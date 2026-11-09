@@ -1,0 +1,65 @@
+[package]
+name = "fuckfm"
+version = "0.1.0"
+edition = "2021"
+description = "fuck file management — SDL-themed file manager + fuckWM / dwm shell"
+license = "MIT"
+default-run = "fuckfm"
+
+[lib]
+name = "fuckfm"
+path = "src/lib.rs"
+
+[[bin]]
+name = "fuckfm"
+path = "src/bin/fuckfm.rs"
+
+[[bin]]
+name = "fuckwm"
+path = "src/bin/fuckwm.rs"
+
+[[bin]]
+name = "dwm"
+path = "src/bin/dwm.rs"
+
+[[bin]]
+name = "b00merang2fficons"
+path = "src/bin/b00merang2fficons.rs"
+
+[dependencies]
+anyhow = "1.0"
+flate2 = "1.0"
+fontdue = "0.9"
+image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "qoi"] }
+sdl2 = "0.38"
+thiserror = "2.0"
+
+# Unix-only (excluded from Windows builds)
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+x11-dl = "2.21"
+x11rb = { version = "0.13", default-features = true, features = ["allow-unsafe-code", "cursor"] }
+khronos-egl = { version = "6.0.0", features = ["dynamic"] }
+gl = "0.14"
+
+# Windows-only (excluded from Linux/macOS builds)
+[target.'cfg(windows)'.dependencies]
+winreg = "0.55"
+gl = "0.14"
+libloading = "0.8"
+windows-sys = { version = "0.59", features = [
+    "Win32_Foundation",
+    "Win32_Graphics_Gdi",
+    "Win32_Graphics_OpenGL",
+    "Win32_Storage_FileSystem",
+    "Win32_System_LibraryLoader",
+    "Win32_System_SystemInformation",
+    "Win32_UI_WindowsAndMessaging",
+    "Win32_UI_HiDpi",
+] }
+
+[features]
+default = []
+
+[profile.release]
+opt-level = 3
