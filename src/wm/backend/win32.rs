@@ -523,7 +523,7 @@ unsafe fn blit_rgba_raw(
     for px in rgba.chunks_exact(4) {
         bgra.extend_from_slice(&[px[2], px[1], px[0], px[3]]);
     }
-    let mut bmi = BITMAPINFO {
+    let bmi = BITMAPINFO {
         bmiHeader: BITMAPINFOHEADER {
             biSize: std::mem::size_of::<BITMAPINFOHEADER>() as u32,
             biWidth: width as i32,

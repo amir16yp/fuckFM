@@ -532,9 +532,6 @@ fn set_default_unix(path: &Path, app_id: &str) -> Result<()> {
 
 #[cfg(windows)]
 fn set_default_windows(path: &Path, app_id: &str) -> Result<()> {
-    use winreg::enums::*;
-    use winreg::RegKey;
-
     let ext = path
         .extension()
         .and_then(|e| e.to_str())
@@ -554,14 +551,14 @@ fn set_default_windows(path: &Path, app_id: &str) -> Result<()> {
     match write_user_assoc(&ext, &prog_id, &cmd) {
         Ok(()) => Ok(()),
         Err(err) => {
-            let io = err
+            let access_denied = err
                 .downcast_ref::<std::io::Error>()
-                .cloned()
-                .or_else(|| {
-                    err.chain()
-                        .find_map(|e| e.downcast_ref::<std::io::Error>().cloned())
+                .is_some_and(crate::platform::elevate::is_access_denied)
+                || err.chain().any(|e| {
+                    e.downcast_ref::<std::io::Error>()
+                        .is_some_and(crate::platform::elevate::is_access_denied)
                 });
-            if io.as_ref().is_some_and(crate::platform::elevate::is_access_denied) {
+            if access_denied {
                 let script = format!(
                     "$ext='{ext}'; $progId='{prog_id}'; $cmd='{cmd}'; \
                      New-Item -Path \"HKCU:\\Software\\Classes\\$ext\" -Force | Out-Null; \
@@ -605,7 +602,7 @@ fn resolve_windows_app_path(app_id: &str) -> Option<PathBuf> {
     if p.is_file() {
         return Some(p);
     }
-    if let Ok(path) = std::env::var_os("PATH") {
+    if let Some(path) = std::env::var_os("PATH") {
         for dir in std::env::split_paths(&path) {
             let cand = dir.join(app_id);
             if cand.is_file() {

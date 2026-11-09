@@ -156,7 +156,7 @@ foreach ($item in $rb.Items()) {
         let size = parts
             .next()
             .and_then(|s| s.parse::<u64>().ok())
-            .filter(|&n| !is_dir);
+            .filter(|_| !is_dir);
         entries.push(DirEntry {
             name: name.to_string(),
             path: PathBuf::from(path),
