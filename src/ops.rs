@@ -248,24 +248,59 @@ pub fn create_symlink(target: &Path) -> Result<PathBuf> {
     }
     #[cfg(windows)]
     {
-        if target.is_dir() {
-            std::os::windows::fs::symlink_dir(target, &dest).with_context(|| {
-                format!(
-                    "symlink_dir {} -> {} (may need Developer Mode)",
-                    dest.display(),
-                    target.display()
-                )
-            })?;
+        let result = if target.is_dir() {
+            std::os::windows::fs::symlink_dir(target, &dest)
         } else {
-            std::os::windows::fs::symlink_file(target, &dest).with_context(|| {
-                format!(
-                    "symlink_file {} -> {} (may need Developer Mode)",
-                    dest.display(),
-                    target.display()
-                )
-            })?;
+            std::os::windows::fs::symlink_file(target, &dest)
+        };
+        if let Err(err) = result {
+            if crate::platform::elevate::is_access_denied(&err) {
+                let src = target.display().to_string().replace('\'', "''");
+                let dst = dest.display().to_string().replace('\'', "''");
+                let kind = if target.is_dir() { "Directory" } else { "File" };
+                let script = format!(
+                    "New-Item -ItemType SymbolicLink -Path '{dst}' -Target '{src}' -Force"
+                );
+                let _ = kind;
+                crate::platform::elevate::run_elevated_powershell(&script).with_context(|| {
+                    format!(
+                        "elevated symlink {} -> {} (or enable Developer Mode)",
+                        dest.display(),
+                        target.display()
+                    )
+                })?;
+            } else {
+                return Err(err).with_context(|| {
+                    format!(
+                        "symlink {} -> {} (may need Developer Mode)",
+                        dest.display(),
+                        target.display()
+                    )
+                });
+            }
         }
     }
+    Ok(dest)
+}
+
+/// Create a hard link next to `target` (files only; same filesystem required).
+pub fn create_hardlink(target: &Path) -> Result<PathBuf> {
+    if target.is_dir() {
+        anyhow::bail!("hard links to directories are not supported");
+    }
+    if !target.is_file() {
+        anyhow::bail!("hard link target must be a regular file");
+    }
+    let parent = target
+        .parent()
+        .ok_or_else(|| anyhow::anyhow!("no parent directory"))?;
+    let name = target
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("target has no name"))?
+        .to_string_lossy();
+    let dest = unique_path(parent.join(format!("{name} - hardlink")));
+    fs::hard_link(target, &dest)
+        .with_context(|| format!("hardlink {} -> {}", dest.display(), target.display()))?;
     Ok(dest)
 }
 

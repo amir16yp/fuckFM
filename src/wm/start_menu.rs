@@ -35,7 +35,7 @@ pub struct StartEntry {
     pub separator_before: bool,
 }
 
-/// Classic places + power layout used by fuckWM / dwm Start.
+/// Classic places + power layout used by fuckWM Start.
 pub fn default_entries() -> Vec<StartEntry> {
     vec![
         StartEntry {

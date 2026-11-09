@@ -1,7 +1,7 @@
 @echo off
-REM Build Windows release binaries and register dwm.exe as the Winlogon Shell
-REM (Explorer.exe replacement for this user). Run from an elevated or normal
-REM CMD in the repo root, or double-click after editing paths.
+REM Build Windows release binaries and register fuckwm.exe as the Winlogon Shell
+REM (Explorer.exe replacement for this user). Does NOT replace Microsoft's DWM
+REM compositor — only the shell host (desktop / taskbar / Start).
 REM
 REM Usage:
 REM   scripts\install-shell.cmd              build + install shell
@@ -32,6 +32,7 @@ set "WINLOGON=HKCU\Software\Microsoft\Windows NT\CurrentVersion\Winlogon"
 set "BACKUP_VAL=Shell.fuckfm.bak"
 set "PROFILE=release"
 set "OUT=%ROOT%\target\%PROFILE%"
+set "SHELL_EXE=%OUT%\fuckwm.exe"
 
 where cargo >nul 2>&1
 if errorlevel 1 (
@@ -49,8 +50,8 @@ if errorlevel 1 (
   exit /b 1
 )
 
-if not exist "%OUT%\dwm.exe" (
-  echo error: missing %OUT%\dwm.exe
+if not exist "%SHELL_EXE%" (
+  echo error: missing %SHELL_EXE%
   exit /b 1
 )
 if not exist "%OUT%\fuckfm.exe" (
@@ -65,7 +66,7 @@ if exist "%ROOT%\assets\icons" (
 )
 
 echo ==^> Built:
-dir /b "%OUT%\fuckfm.exe" "%OUT%\fuckwm.exe" "%OUT%\dwm.exe"
+dir /b "%OUT%\fuckfm.exe" "%SHELL_EXE%"
 
 if /I "%ACTION%"=="build" (
   echo ==^> build-only done
@@ -75,7 +76,7 @@ if /I "%ACTION%"=="build" (
 
 echo.
 echo ==^> Registering shell replacement for THIS USER
-echo     Winlogon Shell -^> "%OUT%\dwm.exe"
+echo     Winlogon Shell -^> "%SHELL_EXE%"
 echo     Previous value stored as %BACKUP_VAL%
 echo.
 
@@ -97,7 +98,7 @@ if errorlevel 1 (
   echo     backup already present — leaving %BACKUP_VAL% unchanged
 )
 
-reg add "%WINLOGON%" /v Shell /t REG_SZ /d "%OUT%\dwm.exe" /f >nul
+reg add "%WINLOGON%" /v Shell /t REG_SZ /d "%SHELL_EXE%" /f >nul
 if errorlevel 1 (
   echo error: failed to set Shell registry value
   popd >nul
@@ -105,7 +106,7 @@ if errorlevel 1 (
 )
 
 echo.
-echo ==^> Shell set. Log off and back on ^(or reboot^) to start dwm.exe instead of Explorer.
+echo ==^> Shell set. Log off and back on ^(or reboot^) to start fuckwm.exe instead of Explorer.
 echo     Restore later with:  scripts\restore-shell.cmd
 echo                          ^(or scripts\install-shell.cmd /restore^)
 echo     Status:              scripts\install-shell.cmd /status
@@ -135,23 +136,24 @@ exit /b 0
 echo ==^> Winlogon Shell status ^(HKCU^)
 reg query "%WINLOGON%" /v Shell 2>nul
 reg query "%WINLOGON%" /v %BACKUP_VAL% 2>nul
-if exist "%OUT%\dwm.exe" (
-  echo     dwm.exe: %OUT%\dwm.exe
+if exist "%SHELL_EXE%" (
+  echo     fuckwm.exe: %SHELL_EXE%
 ) else (
-  echo     dwm.exe: not built yet ^(%OUT%\dwm.exe^)
+  echo     fuckwm.exe: not built yet ^(%SHELL_EXE%^)
 )
 popd >nul
 exit /b 0
 
 :help
-echo install-shell.cmd — build dwm.exe and set it as the user shell ^(Explorer replacement^)
+echo install-shell.cmd — build fuckwm.exe and set it as the user shell ^(Explorer replacement^)
 echo.
-echo   scripts\install-shell.cmd              build release + set Shell=dwm.exe
+echo   scripts\install-shell.cmd              build release + set Shell=fuckwm.exe
 echo   scripts\install-shell.cmd /build-only  cargo build --release only
 echo   scripts\install-shell.cmd /restore     restore previous Shell
 echo   scripts\install-shell.cmd /status      show Shell registry values
 echo.
 echo Writes HKCU\...\Winlogon\Shell for the current user only.
+echo Replaces Explorer as shell host — not Microsoft's DWM compositor.
 echo Log off after install/restore. Use /restore if the desktop fails to start.
 popd >nul
 exit /b 0

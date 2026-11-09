@@ -4,7 +4,17 @@ use crate::render::{Frame, Rect};
 use anyhow::Result;
 use std::fs;
 use std::path::Path;
+use std::sync::{Arc, Mutex};
 use std::time::{SystemTime, UNIX_EPOCH};
+
+#[derive(Clone, Debug, Default)]
+pub struct FolderSizeProgress {
+    pub done: bool,
+    pub bytes: u64,
+    pub entries: u64,
+    pub truncated: bool,
+    pub error: Option<String>,
+}
 
 /// Docked details / properties pane (selection summary).
 pub struct DetailsPane {
@@ -101,6 +111,8 @@ pub struct PropertiesDialog {
     pub rect: Rect,
     title: String,
     lines: Vec<(String, String)>,
+    size_job: Option<Arc<Mutex<FolderSizeProgress>>>,
+    size_line_idx: Option<usize>,
 }
 
 impl PropertiesDialog {
@@ -110,6 +122,8 @@ impl PropertiesDialog {
             rect: Rect::default(),
             title: String::new(),
             lines: Vec::new(),
+            size_job: None,
+            size_line_idx: None,
         }
     }
 
@@ -122,9 +136,27 @@ impl PropertiesDialog {
         self.rect = Rect::new(0, 0, 420, 260);
         self.rect.x = parent.x + (parent.w - self.rect.w) / 2;
         self.rect.y = parent.y + (parent.h - self.rect.h) / 2;
+        self.size_job = None;
+        self.size_line_idx = None;
 
-        let (title, lines) = build_property_lines(entries);
+        let (title, mut lines) = build_property_lines(entries);
         self.title = title;
+
+        // Kick a full async walk for a single folder selection.
+        if entries.len() == 1 && matches!(entries[0].kind, EntryKind::Folder) {
+            let path = entries[0].path.clone();
+            if let Some(idx) = lines.iter().position(|(k, _)| k == "Size") {
+                lines[idx].1 = "Calculating…".into();
+                self.size_line_idx = Some(idx);
+            }
+            let progress = Arc::new(Mutex::new(FolderSizeProgress::default()));
+            let job = Arc::clone(&progress);
+            std::thread::spawn(move || {
+                walk_folder_size(&path, &job);
+            });
+            self.size_job = Some(progress);
+        }
+
         self.lines = lines;
         let line_h = 22;
         let needed = 48 + self.lines.len() as i32 * line_h + 40;
@@ -132,9 +164,53 @@ impl PropertiesDialog {
         self.rect.y = parent.y + (parent.h - self.rect.h) / 2;
     }
 
+    /// Poll async folder-size job; returns true when the Size line changed.
+    pub fn poll_size(&mut self) -> bool {
+        let (job, idx) = match (self.size_job.as_ref(), self.size_line_idx) {
+            (Some(j), Some(i)) => (j, i),
+            _ => return false,
+        };
+        let Ok(guard) = job.lock() else {
+            return false;
+        };
+        let text = if let Some(err) = guard.error.as_ref() {
+            format!("Error: {err}")
+        } else if guard.done {
+            if guard.truncated {
+                format!("{} (partial)", human_bytes(guard.bytes))
+            } else {
+                format!(
+                    "{} ({} items)",
+                    human_bytes(guard.bytes),
+                    guard.entries
+                )
+            }
+        } else {
+            format!(
+                "{}… ({} items)",
+                human_bytes(guard.bytes),
+                guard.entries
+            )
+        };
+        let done = guard.done;
+        drop(guard);
+        if self.lines.get(idx).map(|(_, v)| v.as_str()) == Some(text.as_str()) {
+            return false;
+        }
+        if let Some(line) = self.lines.get_mut(idx) {
+            line.1 = text;
+        }
+        if done {
+            self.size_job = None;
+        }
+        true
+    }
+
     pub fn hide(&mut self) {
         self.open = false;
         self.lines.clear();
+        self.size_job = None;
+        self.size_line_idx = None;
     }
 
     pub fn hit_close(&self, x: i32, y: i32, title_h: i32) -> bool {
@@ -283,45 +359,62 @@ fn size_line(entry: &DirEntry) -> String {
                 )
             }
         }
-        EntryKind::Folder => match folder_byte_count(&entry.path, 2_000) {
-            Some(n) => format!("{} (sampled)", human_bytes(n)),
-            None => "Folder".into(),
-        },
+        EntryKind::Folder => "Calculating…".into(),
         EntryKind::File => entry.size.map(human_bytes).unwrap_or_else(|| "—".into()),
     }
 }
 
-/// Shallow recursive size with a hard entry cap (keeps UI snappy).
-fn folder_byte_count(path: &Path, max_entries: usize) -> Option<u64> {
-    let mut budget = max_entries;
-    folder_byte_count_inner(path, &mut budget)
-}
-
-fn folder_byte_count_inner(path: &Path, budget: &mut usize) -> Option<u64> {
-    if *budget == 0 {
-        return Some(0);
-    }
-    let rd = fs::read_dir(path).ok()?;
-    let mut total = 0u64;
-    for item in rd.flatten() {
-        if *budget == 0 {
+/// Full recursive folder walk (capped) for the Properties size job.
+fn walk_folder_size(path: &Path, progress: &Arc<Mutex<FolderSizeProgress>>) {
+    const MAX_ENTRIES: u64 = 500_000;
+    let mut stack = vec![path.to_path_buf()];
+    let mut bytes = 0u64;
+    let mut entries = 0u64;
+    let mut truncated = false;
+    while let Some(dir) = stack.pop() {
+        let rd = match fs::read_dir(&dir) {
+            Ok(rd) => rd,
+            Err(err) => {
+                if let Ok(mut g) = progress.lock() {
+                    g.error = Some(err.to_string());
+                    g.done = true;
+                }
+                return;
+            }
+        };
+        for item in rd.flatten() {
+            entries += 1;
+            if entries > MAX_ENTRIES {
+                truncated = true;
+                break;
+            }
+            let p = item.path();
+            let meta = match item.metadata() {
+                Ok(m) => m,
+                Err(_) => continue,
+            };
+            if meta.is_dir() {
+                stack.push(p);
+            } else {
+                bytes += meta.len();
+            }
+            if entries % 64 == 0 {
+                if let Ok(mut g) = progress.lock() {
+                    g.bytes = bytes;
+                    g.entries = entries;
+                }
+            }
+        }
+        if truncated {
             break;
         }
-        *budget -= 1;
-        let p = item.path();
-        let meta = match item.metadata() {
-            Ok(m) => m,
-            Err(_) => continue,
-        };
-        if meta.is_dir() {
-            if let Some(n) = folder_byte_count_inner(&p, budget) {
-                total += n;
-            }
-        } else {
-            total += meta.len();
-        }
     }
-    Some(total)
+    if let Ok(mut g) = progress.lock() {
+        g.bytes = bytes;
+        g.entries = entries;
+        g.truncated = truncated;
+        g.done = true;
+    }
 }
 
 fn extra_times(path: &Path) -> (Option<String>, Option<String>) {

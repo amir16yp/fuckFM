@@ -1,4 +1,4 @@
-//! Hardware-accelerated chrome painting for native fuckWM / dwm.
+//! Hardware-accelerated chrome painting for native fuckWM.
 //!
 //! - Linux: EGL + OpenGL ES 2 on a shared Xlib/xcb connection (Xephyr+Glamor OK)
 //! - Windows: WGL + OpenGL on HWND
@@ -68,14 +68,14 @@ impl Gpu {
     pub fn connect_win32() -> Result<Self> {
         match wgl::WglHost::new() {
             Ok(inner) => {
-                eprintln!("dwm: GPU accel ON (WGL/OpenGL)");
+                eprintln!("fuckWM: GPU accel ON (WGL/OpenGL)");
                 Ok(Self {
                     inner,
                     active: true,
                 })
             }
             Err(err) => {
-                eprintln!("dwm: GPU accel OFF ({err}); using GDI fills");
+                eprintln!("fuckWM: GPU accel OFF ({err}); using GDI fills");
                 Err(err)
             }
         }

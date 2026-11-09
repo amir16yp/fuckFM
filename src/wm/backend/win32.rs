@@ -1,7 +1,8 @@
-//! Win32 shell host (`dwm.exe` path) with optional WGL GPU accel.
+//! Win32 shell host (`fuckwm.exe`) with optional WGL GPU accel.
 //!
-//! Phase 1+: fullscreen desktop HWND (icons from ~/Desktop) + topmost taskbar
-//! with Start menu popup. Not yet a full Explorer / DWM compositor replacement.
+//! Fullscreen desktop HWND (icons from ~/Desktop) + topmost taskbar + Start.
+//! Replaces Explorer as the Winlogon shell when installed — not Microsoft's
+//! Desktop Window Manager compositor.
 
 use crate::iconpack::{purpose, purpose_for_file, IconPack, IconRgba};
 use crate::settings::Settings;
@@ -778,7 +779,7 @@ unsafe fn desktop_context_menu(hwnd: HWND, client_x: i32, client_y: i32) {
     let w_refresh = wide("Refresh");
     let w_open = wide("Open fuckFM");
     let w_new = wide("New Folder");
-    let w_exit = wide("Exit dwm");
+    let w_exit = wide("Exit fuckWM");
     AppendMenuW(menu, MF_STRING, IDM_REFRESH, w_refresh.as_ptr());
     AppendMenuW(menu, MF_STRING, IDM_OPEN_FM, w_open.as_ptr());
     AppendMenuW(menu, MF_STRING, IDM_NEW_FOLDER, w_new.as_ptr());

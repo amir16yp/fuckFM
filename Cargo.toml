@@ -2,7 +2,7 @@
 name = "fuckfm"
 version = "0.1.0"
 edition = "2021"
-description = "fuck file management — SDL-themed file manager + fuckWM / dwm shell"
+description = "fuck file management — SDL-themed file manager + fuckWM shell/WM host"
 license = "MIT"
 default-run = "fuckfm"
 
@@ -19,10 +19,6 @@ name = "fuckwm"
 path = "src/bin/fuckwm.rs"
 
 [[bin]]
-name = "dwm"
-path = "src/bin/dwm.rs"
-
-[[bin]]
 name = "b00merang2fficons"
 path = "src/bin/b00merang2fficons.rs"
 
@@ -31,6 +27,7 @@ anyhow = "1.0"
 flate2 = "1.0"
 fontdue = "0.9"
 image = { version = "0.25.10", default-features = false, features = ["jpeg", "png", "gif", "webp", "bmp", "qoi"] }
+regex = "1.11"
 sdl2 = "0.38"
 thiserror = "2.0"
 

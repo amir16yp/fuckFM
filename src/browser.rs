@@ -1,4 +1,5 @@
 use crate::ops::glob_match;
+use crate::platform::network::{is_remote_uri, network_entries, normalize_uri};
 use crate::platform::{free_space, human_bytes, list_trash, this_pc_entries, trash_label};
 use anyhow::{Context, Result};
 use std::cmp::Ordering;
@@ -9,6 +10,7 @@ use std::time::SystemTime;
 /// Virtual location marker used in history / side pane.
 pub const THIS_PC: &str = "fuckfm:this-pc";
 pub const TRASH: &str = "fuckfm:trash";
+pub const NETWORK: &str = "fuckfm:network";
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum EntryKind {
@@ -39,6 +41,9 @@ pub enum SortKey {
 pub enum Location {
     ThisPc,
     Trash,
+    Network,
+    /// Remote URI (`smb://…`) currently backed by a local mount path.
+    Remote { uri: String, path: PathBuf },
     Path(PathBuf),
 }
 
@@ -47,6 +52,18 @@ impl Location {
         match self {
             Location::ThisPc => "This PC".into(),
             Location::Trash => trash_label().into(),
+            Location::Network => "Network".into(),
+            Location::Remote { uri, .. } => uri.clone(),
+            Location::Path(p) => p.display().to_string(),
+        }
+    }
+
+    pub fn session_key(&self) -> String {
+        match self {
+            Location::ThisPc => THIS_PC.into(),
+            Location::Trash => TRASH.into(),
+            Location::Network => NETWORK.into(),
+            Location::Remote { uri, .. } => uri.clone(),
             Location::Path(p) => p.display().to_string(),
         }
     }
@@ -114,6 +131,20 @@ impl Browser {
                 browser.goto_trash(false)?;
                 Ok(browser)
             }
+            Location::Network => {
+                let mut browser = Self::open_this_pc()?;
+                browser.goto_network(false, &[], &[])?;
+                Ok(browser)
+            }
+            Location::Remote { uri, path } => {
+                let mut browser = Self::open(path)?;
+                browser.location = Location::Remote {
+                    uri: uri.clone(),
+                    path: path.clone(),
+                };
+                browser.refresh()?;
+                Ok(browser)
+            }
             Location::Path(path) => Self::open(path),
         }
     }
@@ -121,7 +152,8 @@ impl Browser {
     pub fn cwd_path(&self) -> Option<&Path> {
         match &self.location {
             Location::Path(p) => Some(p.as_path()),
-            Location::ThisPc | Location::Trash => None,
+            Location::Remote { path, .. } => Some(path.as_path()),
+            Location::ThisPc | Location::Trash | Location::Network => None,
         }
     }
 
@@ -129,9 +161,23 @@ impl Browser {
         self.unfiltered = match &self.location {
             Location::ThisPc => this_pc_entries()?,
             Location::Trash => list_trash()?,
-            Location::Path(cwd) => read_dir_entries(cwd, self.show_hidden)?,
+            Location::Network => network_entries(&[], &[])?,
+            Location::Remote { path, .. } | Location::Path(path) => {
+                read_dir_entries(path, self.show_hidden)?
+            }
         };
         self.apply_filter_and_sort();
+        Ok(())
+    }
+
+    /// Refresh Network view with recent + bookmark URIs from settings.
+    pub fn refresh_network(&mut self, recent: &[String], bookmarks: &[String]) -> Result<()> {
+        if matches!(self.location, Location::Network) {
+            self.unfiltered = network_entries(recent, bookmarks)?;
+            self.apply_filter_and_sort();
+        } else {
+            self.refresh()?;
+        }
         Ok(())
     }
 
@@ -158,8 +204,12 @@ impl Browser {
         if self.filter.is_empty() {
             self.entries = self.unfiltered.clone();
         } else if self.recursive_search {
-            if let Location::Path(cwd) = &self.location {
-                let cwd = cwd.clone();
+            let cwd = match &self.location {
+                Location::Path(p) => Some(p.clone()),
+                Location::Remote { path, .. } => Some(path.clone()),
+                _ => None,
+            };
+            if let Some(cwd) = cwd {
                 let q = self.filter.clone();
                 let hidden = self.show_hidden;
                 self.entries = recursive_name_matches(&cwd, &q, hidden, 4_000);
@@ -220,6 +270,11 @@ impl Browser {
     }
 
     pub fn enter(&mut self, entry: &DirEntry) -> Result<bool> {
+        let path_str = entry.path.to_string_lossy();
+        if is_remote_uri(&path_str) || path_str.starts_with("smb://") {
+            // Caller (app) should mount + goto_remote; treat as navigable marker.
+            return Ok(false);
+        }
         if !entry.is_dir {
             return Ok(false);
         }
@@ -231,8 +286,18 @@ impl Browser {
     pub fn up(&mut self) -> Result<bool> {
         match &self.location {
             Location::ThisPc => Ok(false),
+            Location::Network => {
+                self.push_nav(Location::ThisPc);
+                self.refresh()?;
+                Ok(true)
+            }
             Location::Trash => {
                 self.push_nav(Location::ThisPc);
+                self.refresh()?;
+                Ok(true)
+            }
+            Location::Remote { .. } => {
+                self.push_nav(Location::Network);
                 self.refresh()?;
                 Ok(true)
             }
@@ -338,6 +403,37 @@ impl Browser {
         self.refresh()
     }
 
+    pub fn goto_network(
+        &mut self,
+        push_history: bool,
+        recent: &[String],
+        bookmarks: &[String],
+    ) -> Result<()> {
+        if push_history {
+            self.push_nav(Location::Network);
+        } else {
+            self.location = Location::Network;
+            self.forward.clear();
+        }
+        self.unfiltered = network_entries(recent, bookmarks)?;
+        self.apply_filter_and_sort();
+        Ok(())
+    }
+
+    pub fn goto_remote(&mut self, uri: &str, path: PathBuf, push_history: bool) -> Result<()> {
+        let next = Location::Remote {
+            uri: normalize_uri(uri),
+            path,
+        };
+        if push_history {
+            self.push_nav(next);
+        } else {
+            self.location = next;
+            self.forward.clear();
+        }
+        self.refresh()
+    }
+
     pub fn goto(&mut self, path: impl AsRef<Path>, push_history: bool) -> Result<()> {
         let path = path.as_ref();
         if path == Path::new(THIS_PC) {
@@ -345,6 +441,13 @@ impl Browser {
         }
         if path == Path::new(TRASH) {
             return self.goto_trash(push_history);
+        }
+        if path == Path::new(NETWORK) {
+            return self.goto_network(push_history, &[], &[]);
+        }
+        let as_str = path.to_string_lossy();
+        if is_remote_uri(&as_str) {
+            anyhow::bail!("remote URI needs mount first: {as_str}");
         }
         let cwd = fs::canonicalize(path)
             .with_context(|| format!("canonicalize {}", path.display()))?;
@@ -362,6 +465,8 @@ impl Browser {
         match &self.location {
             Location::ThisPc => "This PC".into(),
             Location::Trash => trash_label().into(),
+            Location::Network => "Network".into(),
+            Location::Remote { uri, .. } => uri.clone(),
             Location::Path(cwd) => cwd
                 .file_name()
                 .map(|s| s.to_string_lossy().to_string())
@@ -416,7 +521,14 @@ impl Browser {
                     )
                 }
             }
-            Location::Path(path) => {
+            Location::Network => {
+                if selected > 0 {
+                    format!("{selected} selected  —  {} network place(s)", self.entries.len())
+                } else {
+                    format!("{} network place(s)", self.entries.len())
+                }
+            }
+            Location::Remote { path, .. } | Location::Path(path) => {
                 let dirs = self.entries.iter().filter(|e| e.is_dir).count();
                 let files = self.entries.len() - dirs;
                 let mut s = if selected > 0 {
@@ -469,6 +581,9 @@ fn normalize_start(path: &Path) -> Result<Location> {
     }
     if path == Path::new(TRASH) {
         return Ok(Location::Trash);
+    }
+    if path == Path::new(NETWORK) {
+        return Ok(Location::Network);
     }
     let cwd = fs::canonicalize(path)
         .with_context(|| format!("canonicalize {}", path.display()))?;
@@ -523,6 +638,9 @@ fn filter_entries(entries: &[DirEntry], filter: &str) -> Vec<DirEntry> {
 }
 
 fn name_matches(filter: &str, name: &str) -> bool {
+    if let Some((pat, insensitive)) = parse_slash_regex(filter) {
+        return regex_name_matches(pat, insensitive, name);
+    }
     if filter.contains('*') || filter.contains('?') {
         glob_match(filter, name)
     } else {
@@ -530,16 +648,53 @@ fn name_matches(filter: &str, name: &str) -> bool {
     }
 }
 
+/// `/pattern/` or `/pattern/i` (case-insensitive). `/pattern/c` = case-sensitive.
+fn parse_slash_regex(q: &str) -> Option<(&str, bool)> {
+    let q = q.trim();
+    if !q.starts_with('/') || q.len() < 2 {
+        return None;
+    }
+    let rest = &q[1..];
+    let end = rest.rfind('/')?;
+    let pat = &rest[..end];
+    let flags = &rest[end + 1..];
+    if !flags
+        .chars()
+        .all(|c| matches!(c, 'i' | 'I' | 'c' | 'C'))
+    {
+        return None;
+    }
+    let lower = flags.to_ascii_lowercase();
+    let insensitive = !lower.contains('c');
+    Some((pat, insensitive))
+}
+
+fn regex_name_matches(pattern: &str, case_insensitive: bool, name: &str) -> bool {
+    let Ok(re) = regex::RegexBuilder::new(pattern)
+        .case_insensitive(case_insensitive)
+        .build()
+    else {
+        return false;
+    };
+    re.is_match(name)
+}
+
 fn entry_matches_query(entry: &DirEntry, query: &str) -> bool {
     let q = query.trim();
     if q.is_empty() {
         return true;
     }
+    // Whole-bar slash regex (may contain spaces inside `/…/`).
+    if let Some((pat, insensitive)) = parse_slash_regex(q) {
+        return regex_name_matches(pat, insensitive, &entry.name);
+    }
     let advanced = q.contains("type:")
         || q.contains("ext:")
         || q.contains("size:")
         || q.contains("mtime:")
-        || q.contains("modified:");
+        || q.contains("modified:")
+        || q.contains("regex:")
+        || q.contains("re:");
     if !advanced {
         return name_matches(q, &entry.name);
     }
@@ -549,8 +704,16 @@ fn entry_matches_query(entry: &DirEntry, query: &str) -> bool {
     let mut ext_req: Option<&str> = None;
     let mut size_req: Option<&str> = None;
     let mut mtime_req: Option<&str> = None;
+    let mut regex_req: Option<(&str, bool)> = None;
     for token in q.split_whitespace() {
-        if let Some(rest) = token.strip_prefix("type:") {
+        if let Some(rest) = token
+            .strip_prefix("regex:")
+            .or_else(|| token.strip_prefix("re:"))
+        {
+            regex_req = Some((rest, true));
+        } else if let Some(pair) = parse_slash_regex(token) {
+            regex_req = Some(pair);
+        } else if let Some(rest) = token.strip_prefix("type:") {
             type_req = Some(rest);
         } else if let Some(rest) = token.strip_prefix("ext:") {
             ext_req = Some(rest.trim_start_matches('.'));
@@ -587,6 +750,11 @@ fn entry_matches_query(entry: &DirEntry, query: &str) -> bool {
     }
     if let Some(mt) = mtime_req {
         if !mtime_matches(entry, mt) {
+            return false;
+        }
+    }
+    if let Some((pat, insensitive)) = regex_req {
+        if !regex_name_matches(pat, insensitive, &entry.name) {
             return false;
         }
     }

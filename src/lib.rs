@@ -1,9 +1,9 @@
-//! Shared library for **fuckFM** (file manager) and **fuckWM** / **dwm** (shell + WM host).
+//! Shared library for **fuckFM** (file manager) and **fuckWM** (shell + WM host).
 //!
 //! Binaries:
 //! - `fuckfm` — file manager
-//! - `fuckwm` — Linux-oriented WM/shell host name
-//! - `dwm` — Windows-oriented shell+WM host name (same code path today)
+//! - `fuckwm` — shell/WM host on Linux and Windows (Explorer shell replacement on Windows;
+//!   does **not** replace Microsoft’s Desktop Window Manager compositor)
 
 pub mod app;
 pub mod browser;

@@ -19,6 +19,7 @@ pub fn build_context_menu(
     let _ = crate::platform::shell::ensure_cmd_context_menu_entries();
 
     let mut items = Vec::new();
+    let has_folder = folder.map(|p| p.is_dir()).unwrap_or(false);
     let folder_s = folder.map(|p| p.display().to_string()).unwrap_or_default();
 
     if kind == ContextKind::Selection {
@@ -115,26 +116,34 @@ pub fn build_context_menu(
 
     match kind {
         ContextKind::Background => {
-            items.push(ContextItem {
-                label: "New Folder".into(),
-                action: ContextAction::NewFolder,
-                separator_before: true,
-            });
-            items.push(ContextItem {
-                label: "New Empty File".into(),
-                action: ContextAction::NewFile,
-                separator_before: false,
-            });
-            items.push(ContextItem {
-                label: "Add Bookmark".into(),
-                action: ContextAction::AddBookmark,
-                separator_before: false,
-            });
-            items.push(ContextItem {
-                label: "Search".into(),
-                action: ContextAction::SearchInFolder,
-                separator_before: false,
-            });
+            if has_folder {
+                items.push(ContextItem {
+                    label: "New Folder".into(),
+                    action: ContextAction::NewFolder,
+                    separator_before: true,
+                });
+                items.push(ContextItem {
+                    label: "New Empty File".into(),
+                    action: ContextAction::NewFile,
+                    separator_before: false,
+                });
+                items.push(ContextItem {
+                    label: "Add Bookmark".into(),
+                    action: ContextAction::AddBookmark,
+                    separator_before: false,
+                });
+                items.push(ContextItem {
+                    label: "Search".into(),
+                    action: ContextAction::SearchInFolder,
+                    separator_before: false,
+                });
+            } else {
+                items.push(ContextItem {
+                    label: "Connect to Server…".into(),
+                    action: ContextAction::ConnectRemote,
+                    separator_before: true,
+                });
+            }
             items.push(ContextItem {
                 label: "Paste".into(),
                 action: ContextAction::Paste,
@@ -173,6 +182,33 @@ pub fn build_context_menu(
                     action: ContextAction::CreateLink,
                     separator_before: true,
                 });
+                if selected[0].is_file() {
+                    items.push(ContextItem {
+                        label: "Create Hard Link".into(),
+                        action: ContextAction::CreateHardLink,
+                        separator_before: false,
+                    });
+                }
+                super::push_attr_perm_items(&mut items, &selected[0]);
+                let p = &selected[0];
+                let s = p.to_string_lossy();
+                let is_drive = (s.len() >= 2 && s.as_bytes().get(1) == Some(&b':'))
+                    || s.starts_with("\\\\");
+                if is_drive {
+                    super::push_volume_items(&mut items, p, p.exists());
+                }
+                if s.starts_with("smb://") || s.starts_with("\\\\") {
+                    items.push(ContextItem {
+                        label: "Connect / Open".into(),
+                        action: ContextAction::ConnectRemote,
+                        separator_before: true,
+                    });
+                    items.push(ContextItem {
+                        label: "Bookmark Remote".into(),
+                        action: ContextAction::AddRemoteBookmark,
+                        separator_before: false,
+                    });
+                }
             }
             items.push(ContextItem {
                 label: "Properties".into(),

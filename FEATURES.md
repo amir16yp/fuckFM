@@ -5,7 +5,7 @@
 Rust-based file manager aimed at replacing:
 
 - **Linux:** Thunar (feature parity) + optional **fuckWM** as a full window manager
-- **Windows:** File Explorer / `explorer.exe` (file management first); later a **`dwm.exe`** binary module for complete WM + Win7-style shell replacement (same WM codebase as Linux **fuckWM**)
+- **Windows:** File Explorer / `explorer.exe` (file management first); later **`fuckwm.exe`** as Win7-style shell host (Explorer replacement — not Microsoft’s DWM compositor)
 
 Status legend:
 
@@ -25,14 +25,14 @@ Update this file as work lands. Prefer checking items only when the behavior is 
 
 ## 0. Project scaffolding
 
-- [x] Rust workspace / crate layout — lib `fuckfm` + bins `fuckfm` / `fuckwm` / `dwm`
+- [x] Rust workspace / crate layout — lib `fuckfm` + bins `fuckfm` / `fuckwm`
 - [~] Cross-platform GUI shell (window, menus, basic layout) — SDL2 window + themed chrome/list MVP
 - [~] Platform abstraction for filesystem + desktop integration — `src/platform` with `cfg(unix)` / `cfg(windows)`
 - [x] Target-gated dependencies — `libc` only on unix; `winreg` only on windows (excluded from the other OS build)
 - [x] Config / preferences store — `.ffini` binary INI (`~/.config/fuckfm/settings.ffini` / `%APPDATA%\fuckFM\`)
 - [ ] Logging + crash-friendly error surfaces
 - [ ] CI for Linux and Windows builds
-- [x] Build scripts — `scripts/build.sh` (+ `--release` / `build-release.sh`); `install-shell.cmd` / `restore-shell.cmd` for HKCU Winlogon Shell ↔ `dwm.exe`
+- [x] Build scripts — `scripts/build.sh` (+ `--release` / `build-release.sh`); `install-shell.cmd` / `restore-shell.cmd` for HKCU Winlogon Shell ↔ `fuckwm.exe`
 - [x] SDL2 rendering backend
 - [~] Theme engine — built-ins: Win95/98, XP Luna, Win7 Aero, Modern Light/Dark + effect library; `.fficons` packs; planned: Luna variants + `.ffmtheme` (see §18)
 - [x] Directory listing + folder navigation (double-click / Enter, Back, Up)
@@ -90,7 +90,7 @@ Different view types are a core goal — users must be able to switch layouts li
 - [ ] Group / arrange by (type, date, …) — `W`
 - [x] Show / hide hidden files — `B` — Ctrl+H
 - [x] Remember view mode per folder — `B` — saved in `.ffini` `[views]`; restored on navigate
-- [~] Column chooser / reorder / resize in details view — `B` — drag Details header dividers to resize; chooser/reorder still open
+- [x] Column chooser / reorder / resize in details view — `B` — drag dividers to resize; right-click header to show/hide Type/Size/Modified + move left/right
 - [x] View mode toolbar / menu switcher — `B` — View button / F3 cycles List→Details→Icons
 
 ---
@@ -109,7 +109,7 @@ Different view types are a core goal — users must be able to switch layouts li
 - [ ] Tree view side pane — `L` (optional `W`)
 - [ ] Expand tree to current folder — `B`
 - [~] Devices / volumes section — `B` — shown via This PC; side-pane device tree still open
-- [ ] Network browse entry — `B`
+- [x] Network browse entry — `B` — side pane + address `fuckfm:network` / Network crumbs
 - [ ] Libraries (Documents, Music, Pictures, Videos aggregation) — `W`
 - [ ] Cloud provider nodes (e.g. OneDrive) — `W`
 - [ ] Gallery / media-centric entry — `W` (optional)
@@ -121,7 +121,7 @@ Different view types are a core goal — users must be able to switch layouts li
 
 - [x] Open file with default app — `B` — Linux `xdg-open`/`gio`; Windows `Start-Process` / `cmd start`
 - [x] Open with… / choose application — `B` — context Open with listed apps + Other (see §7)
-- [ ] Set default application for type — `B`
+- [x] Set default application for type — `B` — context “Set default: …”; Linux `xdg-mime default`; Windows HKCU ProgID (UAC elevate on access denied)
 - [x] Open folder — `B` — Enter / double-click / context Open
 - [x] Create new folder — `B` — context menu + Ctrl+Shift+N, then rename
 - [x] Create new empty file / from templates — `B` — context “New Empty File” then rename; XDG/`New` templates later
@@ -137,11 +137,11 @@ Different view types are a core goal — users must be able to switch layouts li
 - [x] Conflict resolution on copy/move (skip, replace, rename) — `B` — Settings policy Ask/Rename/Replace/Skip; Ask shows Skip/Replace/Rename (+ Apply to all)
 - [x] Progress UI for long copy/move/delete — `B` — themed progress dialog (classic blocks / Luna / Aero / modern); Cancel; per-item pump so the bar paints; delete still confirm-then-sync
 - [x] Properties dialog (size, dates, type, location) — `B` — Alt+Enter / context; multi-select summary
-- [~] Folder size calculation — `B` — Properties samples up to 2k entries; full async calc later
-- [ ] Permissions / ownership editing — `L`
-- [ ] Attributes / read-only / hidden flags — `W`
-- [x] Create symlink / shortcut — `B` — context “Create Link” (`name - link`); Windows needs Developer Mode for symlinks
-- [ ] Create hardlink — `L` (where supported)
+- [x] Folder size calculation — `B` — Properties async full walk (live progress; capped at 500k entries)
+- [x] Permissions / ownership editing — `L` — context Permissions (octal) + Take Ownership via pkexec; Windows Take Ownership (Admin) via UAC
+- [x] Attributes / read-only / hidden flags — `W` — context toggles; `SetFileAttributes` with UAC elevate on access denied
+- [x] Create symlink / shortcut — `B` — context “Create Link” (`name - link`); Windows elevates on access denied (or use Developer Mode)
+- [x] Create hardlink — `B` — context “Create Hard Link” for a single file (`name - hardlink`; same FS)
 - [x] Send to… menu — `B` — context Send to Desktop / Home / Documents / Downloads / …
 
 ---
@@ -165,7 +165,7 @@ Hybrid of **Everything**-style instant find and **WizTree**-style size indexing 
 
 - [x] Toolbar search bar filters current location by name — `B` — click / Ctrl+F; substring or `*`/`?` glob; Esc clears
 - [ ] Instant/indexed filename search across drives — `B`
-- [~] Search by name (substring / glob / regex) — `B` — substring + glob in current folder; regex still open
+- [x] Search by name (substring / glob / regex) — `B` — substring + glob; `regex:`/`re:` or `/pat/` (`/pat/c` case-sensitive)
 - [x] Search by type / extension / MIME — `B` — `type:folder|file|image|…` / `ext:png` (MIME still open)
 - [x] Search by size range — `B` — `size:>1M` / `size:<=512k` / `size:1M-10M`
 - [x] Search by date modified — `B` — `mtime:today|week|7d` / `mtime:>3d` / `modified:…`
@@ -237,21 +237,21 @@ Preview many formats via **ffmpeg** and other existing tools/libraries (not a cu
 
 ## 9. Removable media & volumes
 
-- [ ] List mounted / unmounted volumes — `B`
-- [ ] Mount / unmount / eject — `B`
-- [ ] Auto-mount on insert (configurable) — `B`
-- [ ] Auto-open / auto-run policy for media — `B`
+- [x] List mounted / unmounted volumes — `B` — This PC shows mounted + unmounted via lsblk/udisks / Win drives
+- [x] Mount / unmount / eject — `B` — context menu + activate unmounted `/dev` (gio/udisksctl / net use)
+- [x] Auto-mount on insert (configurable) — `B` — Settings → Removable media; polled insert detection
+- [x] Auto-open / auto-run policy for media — `B` — off / open / ask (confirm dialog)
 - [x] Drive free-space indicators — `B` — usage bars in Details + Icons for drives
-- [ ] Format / volume label helpers (where safe/supported) — `B` (careful UX)
+- [x] Format / volume label helpers (where safe/supported) — `B` (careful UX) — confirm before format; label prompt
 
 ---
 
 ## 10. Network & remote locations
 
-- [ ] Browse network neighborhood / SMB — `B`
-- [ ] Open `smb://`, `ftp://`, `sftp://`, `mtp://` (or platform equivalents) — `B`
-- [ ] Recent / bookmarked remote locations — `B`
-- [ ] Credential prompts for remote shares — `B`
+- [x] Browse network neighborhood / SMB — `B` — Network place + side pane; avahi/`smbclient` / Windows net view
+- [x] Open `smb://`, `ftp://`, `sftp://`, `mtp://` (or platform equivalents) — `B` — gio mount / Windows UNC
+- [x] Recent / bookmarked remote locations — `B` — settings + Network list + context bookmark
+- [x] Credential prompts for remote shares — `B` — user:password prompt on auth failure
 
 ---
 
@@ -338,53 +338,53 @@ Goal: fuckFM can replace Explorer as the **default folder handler** (file manage
 
 ---
 
-## 17. fuckWM / `dwm.exe` — WM + Windows shell replacement
+## 17. fuckWM — WM + Windows shell replacement
 
-> Shared WM/shell host: **fuckWM** (Linux name) and **`dwm`** (Windows name). Same code today. Phase 0 is a nested SDL **shell preview** (not a real compositor / session replacement yet).
+> One shell/WM host binary: **`fuckwm`** on Linux and Windows. Phase 0 is a nested SDL **shell preview** plus a Win32 desktop/taskbar host. On Windows this replaces **Explorer as shell**, not Microsoft’s Desktop Window Manager compositor.
 
 ### 17.0 Binary / packaging
 
-- [x] Separate WM binaries (not the FM process) — `B` — `cargo run --bin fuckwm` / `--bin dwm`; shared lib with fuckFM
-- [~] Windows: produce `dwm.exe` as the shell+WM host — `W` — Win32 desktop icons + Start menu + clock taskbar + WGL; not Explorer shell replacement yet
+- [x] Separate WM binary (not the FM process) — `B` — `cargo run --bin fuckwm`; shared lib with fuckFM
+- [~] Windows: `fuckwm.exe` as the shell host — `W` — Win32 desktop icons + Start menu + clock taskbar + WGL; Explorer shell install via `install-shell.cmd`
 - [~] Linux: installable **fuckWM** WM/compositor session — `L` — X11 WM + EGL/GLES2; `--xephyr` uses `extra/xorg-server-xephyr` + `-glamor`; Wayland later
 - [x] Hardware-accelerated chrome (native mode) — `B` — EGL/XCB (Linux) / WGL (Windows); software fallback if GPU init fails; SDL mode unchanged
 - [~] Shared chrome/theme/cursor pipeline with fuckFM (`.ffmtheme`) — `B` — shared theme engine now; `.ffmtheme` / cursors later
-- [~] Session handoff: FM as folder handler vs fuckWM / `dwm.exe` as shell/WM — `B` — Start/taskbar launches fuckFM; `--sdl` preview fallback
+- [~] Session handoff: FM as folder handler vs fuckWM as shell/WM — `B` — Start/taskbar launches fuckFM; `--sdl` preview fallback
 
 ### 17.1 Desktop shell
 
 - [~] Desktop surface (wallpaper host, icon layer) — theme defaults; Windows registry wallpaper+style; Linux gsettings (GNOME/MATE); SDL / Win32 GDI / X11 PutImage paint
-- [ ] Desktop icon arrange / auto-arrange / align to grid
-- [~] Desktop context menu (display settings, personalize, new item, …) — Win32: Refresh / Open fuckFM / New Folder / Exit
-- [ ] Show desktop / peek desktop
+- [x] Desktop icon arrange / auto-arrange / align to grid — `B` — SDL: Auto / Free / Align to grid via desktop context menu
+- [x] Desktop context menu (display settings, personalize, new item, …) — `B` — SDL + Win32: Refresh / Open fuckFM / New Folder / arrange / Personalize / Show Desktop / Exit
+- [x] Show desktop / peek desktop — `B` — taskbar right strip + Win/Alt+D; peek hover on strip (SDL)
 
-### 17.2 Window manager (Win7 DWM-class + Linux WM)
+### 17.2 Window manager (Win7-class shell + Linux WM)
 
 - [~] Window decoration / titlebars using active theme — `B` — X11 framed clients + titlebar/close (Win32 client framing later)
 - [~] Move / resize / snap / maximize / minimize / close — `B` — X11 move + close; resize/snap later
-- [ ] Alt-Tab / window switcher — `B`
+- [x] Alt-Tab / window switcher — `B` — SDL themed overlay (cycle / click / Enter); Task View reuses it
 - [ ] Virtual desktops / workspaces — `B`
 - [~] Focus policy + stacking — `B` — X11 enter-focus + raise; refine later
-- [ ] Windows: replace Desktop Window Manager / shell host stack where feasible (Win7-class shell session) — `W`
+- [~] Windows: Win7-class shell host session (Explorer replacement) where feasible — `W` — `fuckwm.exe` via Winlogon Shell; cannot replace Microsoft’s DWM compositor
 - [ ] Linux: full WM session (start from display manager / `.desktop` session) — `L`
 - [ ] Multi-monitor layout — `B`
 
 ### 17.3 Taskbar
 
-- [~] Taskbar host — X11/Win32 native strips + SDL preview
+- [~] Taskbar host — X11/Win32 native strips + SDL preview (theme-accurate face per ThemeId)
 - [~] Pinned apps — fuckFM pin only (MVP)
-- [ ] Running app buttons / grouping / badges
-- [ ] Jump lists
-- [ ] Task View / virtual desktops entry
-- [ ] System tray / notification area
-- [~] Clock / calendar flyout — clock in SDL preview; native label stub
-- [ ] Network / volume / battery quick status
-- [ ] Quick Settings / Notification Center equivalents
-- [ ] Widgets entry (optional parity)
+- [x] Running app buttons / grouping / badges — `B` — SDL: per-theme buttons + badge chip; minimize/restore toggle
+- [x] Jump lists — `B` — right-click pin/running → Open fuckFM / This PC / Close
+- [x] Task View / virtual desktops entry — `B` — TV button + flyout; opens Alt-Tab overview (single desktop MVP)
+- [x] System tray / notification area — `B` — chevron + net/vol/bat chips
+- [x] Clock / calendar flyout — `B` — themed clock; click opens month calendar flyout (SDL)
+- [x] Network / volume / battery quick status — `B` — tray probes (Linux sysfs net/battery; stubs elsewhere)
+- [x] Quick Settings / Notification Center equivalents — `B` — tray flyout with status + notifications stub
+- [x] Widgets entry (optional parity) — `B` — Wid button + clock/net/battery widgets panel
 
 ### 17.4 Start & search shell
 
-- [~] Start menu / Start button (logo from active `.ffmtheme`) — classic brand strip + places (fuckFM / This PC / Documents / Desktop / Pictures / CMD) + Cycle theme + power + Exit; icons + hover on Win32 and `--sdl`
+- [~] Start menu / Start button (logo from active `.ffmtheme`) — themed Start (classic flag / Luna green / Aero pearl / modern flat) + caption-gradient brand strip; places + Cycle theme + power + Exit
 - [~] Pinned / recommended apps — fuckFM + places in Start
 - [~] Power actions (sleep, shutdown, restart) — Win32 Start: Log off / Restart / Shut down via `shutdown.exe`
 - [ ] Shell search (apps, settings, files)
@@ -395,14 +395,14 @@ Goal: fuckFM can replace Explorer as the **default folder handler** (file manage
 - [-] Shell namespace extensions hosting — `W`
 - [-] AutoPlay handler — `W`
 - [-] Control Panel / Settings deep links from shell — `W`
-- [~] Set `dwm.exe` as Windows shell (replacement for `explorer.exe` / Win7 shell session) — `W` — `scripts/install-shell.cmd` + `restore-shell.cmd` (HKCU Winlogon Shell); not a full session stack yet
+- [~] Set `fuckwm.exe` as Windows shell (replacement for `explorer.exe` / Win7 shell session) — `W` — `scripts/install-shell.cmd` + `restore-shell.cmd` (HKCU Winlogon Shell); not a full session stack yet
 - [-] Recovery path if shell / WM fails to start — `B`
 
 ---
 
 ## 18. Themes & binary theme packs
 
-> Built-in palettes already cover classic Win9x + modern light/dark. Expand to Aero/Luna and a first-party binary theme format shared by the FM and fuckWM / `dwm.exe`.
+> Built-in palettes already cover classic Win9x + modern light/dark. Expand to Aero/Luna and a first-party binary theme format shared by the FM and fuckWM.
 
 ### 18.1 Built-in looks
 
@@ -430,20 +430,20 @@ Goal: fuckFM can replace Explorer as the **default folder handler** (file manage
 
 ### 18.2 Binary theme file format (`.ffmtheme`)
 
-Own binary theme pack format (not MS `.msstyles`). Embeds chrome styles **and** shell assets so FM + fuckWM / `dwm.exe` load one pack.
+Own binary theme pack format (not MS `.msstyles`). Embeds chrome styles **and** shell assets so FM + fuckWM load one pack.
 
 - [-] Spec + loader/writer for `.ffmtheme` — `B`
 - [-] Pack sections: chrome/colors/metrics, fonts, Start logo (bitmap), cursor set, optional sounds — `B`
 - [-] Default pack = Win95-esque theme with embedded classic Start logo + Win95 `.cur` cursors — `B`
 - [-] Theme browser / picker loads built-ins + user `.ffmtheme` files — `B`
-- [-] Hot-swap theme without restart (FM; fuckWM / `dwm.exe` where safe) — `B`
+- [-] Hot-swap theme without restart (FM; fuckWM where safe) — `B`
 
 ### 18.3 Cursor packs (`.cur` / related)
 
 - [-] Embed cursors inside `.ffmtheme` (default: Win95 cursors in the default Win95-esque pack) — `B`
 - [-] Parse / use classic Windows `.cur` (and common variants from Win95 through Win7/modern where practical) — `B`
 - [-] Per-theme cursor map: arrow, wait, size NESW/NWSE/NS/EW, hand, text I-beam, etc. — `B`
-- [-] Apply cursors in FM window; fuckWM / `dwm.exe` applies system/session cursors when acting as shell/WM — `B`
+- [-] Apply cursors in FM window; fuckWM applies system/session cursors when acting as shell/WM — `B`
 
 ---
 
@@ -459,7 +459,7 @@ Own binary theme pack format (not MS `.msstyles`). Embeds chrome styles **and** 
 8. Volumes / network / Open With / preferences
 9. Bulk rename + custom actions / plugins
 10. Theme packs: Aero + Luna + `.ffmtheme` + `.cur` embedding (section 18)
-11. Only then: fuckWM / `dwm.exe` WM + Windows shell replacement (section 17)
+11. Only then: fuckWM WM + Windows Explorer shell replacement (section 17)
 
 ---
 

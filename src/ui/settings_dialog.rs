@@ -23,6 +23,8 @@ pub enum SettingsHit {
     ToggleConfirmDelete,
     ToggleConfirmDrag,
     CycleConflictPolicy,
+    ToggleAutoMount,
+    CycleMediaAutoOpen,
 }
 
 pub struct SettingsDialog {
@@ -45,6 +47,8 @@ pub struct SettingsDialog {
     confirm_delete_btn: Button,
     confirm_drag_btn: Button,
     conflict_btn: Button,
+    auto_mount_btn: Button,
+    media_auto_open_btn: Button,
 }
 
 impl SettingsDialog {
@@ -76,6 +80,8 @@ impl SettingsDialog {
             confirm_delete_btn: Button::new(Rect::default(), ""),
             confirm_drag_btn: Button::new(Rect::default(), ""),
             conflict_btn: Button::new(Rect::default(), ""),
+            auto_mount_btn: Button::new(Rect::default(), ""),
+            media_auto_open_btn: Button::new(Rect::default(), ""),
         }
     }
 
@@ -115,6 +121,8 @@ impl SettingsDialog {
         h += label_step + row_step + row_step + row_step + section_gap;
         // Defaults rows including conflict policy + details pane + confirm drag
         h += label_step + row_step * 10;
+        // Media: auto-mount + auto-open
+        h += section_gap + label_step + row_step * 2;
         h += pad;
         (w, h)
     }
@@ -183,6 +191,12 @@ impl SettingsDialog {
         }
         if self.conflict_btn.hit(x, y) {
             return SettingsHit::CycleConflictPolicy;
+        }
+        if self.auto_mount_btn.hit(x, y) {
+            return SettingsHit::ToggleAutoMount;
+        }
+        if self.media_auto_open_btn.hit(x, y) {
+            return SettingsHit::CycleMediaAutoOpen;
         }
         SettingsHit::None
     }
@@ -368,6 +382,26 @@ impl SettingsDialog {
         );
         self.conflict_btn.pressed = false;
         self.conflict_btn.draw(frame)?;
+        y += row_step + section_gap;
+
+        frame.text("Removable media", x, y, theme.text)?;
+        y += label_step;
+        self.auto_mount_btn.rect = Rect::new(x, y, content_w, btn_h);
+        self.auto_mount_btn.label = if settings.auto_mount {
+            "[x] Auto-mount removable media".into()
+        } else {
+            "[ ] Auto-mount removable media".into()
+        };
+        self.auto_mount_btn.pressed = false;
+        self.auto_mount_btn.draw(frame)?;
+        y += row_step;
+        self.media_auto_open_btn.rect = Rect::new(x, y, content_w, btn_h);
+        self.media_auto_open_btn.label = format!(
+            "On media insert: {} (click to cycle)",
+            settings.media_auto_open_policy().label()
+        );
+        self.media_auto_open_btn.pressed = false;
+        self.media_auto_open_btn.draw(frame)?;
 
         Ok(())
     }

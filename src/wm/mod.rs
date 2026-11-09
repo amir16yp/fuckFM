@@ -1,10 +1,11 @@
-//! fuckWM / `dwm` — shell + window-manager host.
+//! fuckWM — shell + window-manager host (`fuckwm` binary on Linux and Windows).
 //!
 //! - **Native backends** (`backend/`): X11 reparenting WM (Linux), Win32 shell host (Windows)
 //! - **GPU** (`gpu/`): EGL/GLES2 on XCB (Linux, incl. Xephyr+Glamor), WGL on HWND (Windows)
 //! - **Xephyr** (`xephyr`): `--xephyr` nested server with `-glamor` when available
 //! - **SDL preview** (`shell`): `--sdl` / fallback when native is unavailable
 
+mod alt_tab;
 mod backend;
 mod desktop;
 mod gpu;

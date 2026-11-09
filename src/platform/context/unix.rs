@@ -43,6 +43,27 @@ pub fn build_context_menu(
                     action: ContextAction::OpenTerminal,
                     separator_before: false,
                 });
+                if folder
+                    .map(|p| p.to_string_lossy().contains("/gvfs/"))
+                    .unwrap_or(false)
+                {
+                    items.push(ContextItem {
+                        label: "Disconnect Remote".into(),
+                        action: ContextAction::DisconnectRemote,
+                        separator_before: true,
+                    });
+                    items.push(ContextItem {
+                        label: "Bookmark Remote".into(),
+                        action: ContextAction::AddRemoteBookmark,
+                        separator_before: false,
+                    });
+                }
+            } else {
+                items.push(ContextItem {
+                    label: "Connect to Server…".into(),
+                    action: ContextAction::ConnectRemote,
+                    separator_before: false,
+                });
             }
             items.push(ContextItem {
                 label: "Paste".into(),
@@ -127,6 +148,40 @@ pub fn build_context_menu(
                     action: ContextAction::CreateLink,
                     separator_before: true,
                 });
+                if selected[0].is_file() {
+                    items.push(ContextItem {
+                        label: "Create Hard Link".into(),
+                        action: ContextAction::CreateHardLink,
+                        separator_before: false,
+                    });
+                }
+                super::push_attr_perm_items(&mut items, &selected[0]);
+                let p = &selected[0];
+                let is_drive = p.starts_with("/dev")
+                    || p == Path::new("/")
+                    || p.starts_with("/media")
+                    || p.starts_with("/mnt")
+                    || p.starts_with("/run/media");
+                if is_drive {
+                    super::push_volume_items(&mut items, p, p.is_dir());
+                }
+                let s = p.to_string_lossy();
+                if s.starts_with("smb://")
+                    || s.starts_with("ftp://")
+                    || s.starts_with("sftp://")
+                    || s.starts_with("mtp://")
+                {
+                    items.push(ContextItem {
+                        label: "Connect / Open".into(),
+                        action: ContextAction::ConnectRemote,
+                        separator_before: true,
+                    });
+                    items.push(ContextItem {
+                        label: "Bookmark Remote".into(),
+                        action: ContextAction::AddRemoteBookmark,
+                        separator_before: false,
+                    });
+                }
             }
             items.push(ContextItem {
                 label: "Properties".into(),

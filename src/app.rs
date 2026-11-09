@@ -1,16 +1,16 @@
 use crate::browser::{Browser, Location, SortKey};
-use crate::browser::{THIS_PC, TRASH};
+use crate::browser::{NETWORK, THIS_PC, TRASH};
 use crate::iconpack::IconPack;
 use crate::ops::{
-    copy_path_with, create_empty_file, create_folder, create_symlink, duplicate_path, glob_match,
-    home_dir, intended_dest, move_path_with, paths_as_uri_list, rename_path, ClipMode, Clipboard,
-    ConflictChoice, ConflictPolicy,
+    copy_path_with, create_empty_file, create_folder, create_hardlink, create_symlink,
+    duplicate_path, glob_match, home_dir, intended_dest, move_path_with, paths_as_uri_list,
+    rename_path, ClipMode, Clipboard, ConflictChoice, ConflictPolicy,
 };
 use crate::undo::{UndoOp, UndoStack};
 use crate::platform::{
-    build_context_menu, delete_permanently, empty_trash, open_default, open_with, open_with_dialog,
-    restore_from_trash, run_action, tab_context_menu, trash_label, trash_path, ContextAction,
-    ContextKind,
+    attrs, build_context_menu, delete_permanently, detail_column_menu, empty_trash, open_default,
+    open_with, open_with_dialog, restore_from_trash, run_action, set_default_app, tab_context_menu,
+    trash_label, trash_path, ContextAction, ContextKind,
 };
 use crate::render::{FontAtlas, Frame, Rect};
 use crate::settings::Settings;
@@ -159,6 +159,11 @@ impl Tab {
         list.col_name = self.list.col_name;
         list.col_type = self.list.col_type;
         list.col_size = self.list.col_size;
+        list.col_modified = self.list.col_modified;
+        list.show_type = self.list.show_type;
+        list.show_size = self.list.show_size;
+        list.show_modified = self.list.show_modified;
+        list.detail_order = self.list.detail_order;
         self.other = Some(Box::new((browser, list)));
         self.focus_right = false;
         Ok(true)
@@ -197,6 +202,20 @@ pub struct App {
     transfer: Option<TransferJob>,
     pending_drag: Option<PendingDrag>,
     bookmark_label_edit: Option<PathBuf>,
+    /// When set, `pattern` prompt commits a Unix chmod for this path.
+    perms_edit: Option<PathBuf>,
+    /// When set, `pattern` prompt renames a volume label.
+    volume_label_edit: Option<PathBuf>,
+    /// When true, `pattern` prompt is a remote URI connect dialog.
+    connect_remote_prompt: bool,
+    /// When set, `pattern` prompt expects `user:password` for this URI.
+    remote_creds_uri: Option<String>,
+    pending_format: Option<PathBuf>,
+    pending_media_open: Option<PathBuf>,
+    volumes_seeded: bool,
+    seen_volume_keys: std::collections::BTreeSet<String>,
+    mounted_volume_paths: std::collections::BTreeSet<String>,
+    last_volume_poll: Instant,
     settings_dialog: SettingsDialog,
     preview: PreviewPane,
     thumbs: ThumbCache,
@@ -259,6 +278,16 @@ impl App {
             transfer: None,
             pending_drag: None,
             bookmark_label_edit: None,
+            perms_edit: None,
+            volume_label_edit: None,
+            connect_remote_prompt: false,
+            remote_creds_uri: None,
+            pending_format: None,
+            pending_media_open: None,
+            volumes_seeded: false,
+            seen_volume_keys: std::collections::BTreeSet::new(),
+            mounted_volume_paths: std::collections::BTreeSet::new(),
+            last_volume_poll: Instant::now(),
             settings_dialog: SettingsDialog::new(),
             preview,
             thumbs: ThumbCache::new(256),
@@ -505,6 +534,7 @@ impl App {
             if let Some(pattern) = &self.pattern {
                 pattern.draw(&mut frame)?;
             }
+            let _ = self.properties.poll_size();
             self.properties.draw(&mut frame)?;
             self.confirm.draw(&mut frame)?;
             self.progress.draw(&mut frame)?;
@@ -516,6 +546,7 @@ impl App {
             if self.transfer.is_some() && !self.conflict.open {
                 let _ = self.pump_transfer_step();
             }
+            let _ = self.poll_volumes();
 
             std::thread::sleep(Duration::from_millis(16));
         }
@@ -961,7 +992,7 @@ impl App {
                 }
                 Keycode::Space if !self.ctrl => self.toggle_focus_selection(),
                 Keycode::Return if self.alt => self.show_properties(),
-                Keycode::Return => self.activate_selected()?,
+                Keycode::Return => self.activate_selected(text_input)?,
                 Keycode::Delete if self.shift || self.in_trash() => {
                     self.delete_selected_permanently()?
                 }
@@ -1042,6 +1073,12 @@ impl App {
                     self.tab_mut().browser.goto_trash(true)?;
                     self.tab_mut().after_nav();
                     self.status_override = None;
+                }
+                AddressTarget::Network => {
+                    self.goto_network_view()?;
+                }
+                AddressTarget::Remote(uri) => {
+                    self.open_remote_uri(&uri, None, None, text_input)?;
                 }
                 AddressTarget::Path(path) => match self.tab_mut().browser.goto(&path, true) {
                     Ok(()) => {
@@ -1388,7 +1425,7 @@ impl App {
         if let TabHit::Tab(index) = self.strip.hit(x, y) {
             match &self.tabs[index].browser.location {
                 Location::Trash => return DropTarget::Trash,
-                Location::Path(path) => {
+                Location::Path(path) | Location::Remote { path, .. } => {
                     if path.is_dir() && !is_invalid_drop_dest(path, paths) {
                         return DropTarget::TabDir {
                             index,
@@ -1396,7 +1433,7 @@ impl App {
                         };
                     }
                 }
-                Location::ThisPc => {}
+                Location::ThisPc | Location::Network => {}
             }
         }
 
@@ -1409,7 +1446,7 @@ impl App {
                             return DropTarget::Dir(path.clone());
                         }
                     }
-                    PlaceTarget::ThisPc => {}
+                    PlaceTarget::ThisPc | PlaceTarget::Network => {}
                 }
             } else if paths.iter().any(|p| p.is_dir()) {
                 // Empty side-pane space: pin folders as bookmarks.
@@ -1646,6 +1683,10 @@ impl App {
                         CrumbTarget::Trash => {
                             self.tab_mut().browser.goto_trash(true)?;
                         }
+                        CrumbTarget::Network => {
+                            self.goto_network_view()?;
+                            return Ok(());
+                        }
                         CrumbTarget::Path(path) => {
                             self.tab_mut().browser.goto(&path, true)?;
                         }
@@ -1709,6 +1750,10 @@ impl App {
                     }
                     PlaceTarget::Trash => {
                         self.tab_mut().browser.goto_trash(true)?;
+                    }
+                    PlaceTarget::Network => {
+                        self.goto_network_view()?;
+                        return Ok(());
                     }
                     PlaceTarget::Path(path) => {
                         let _ = std::fs::create_dir_all(&path);
@@ -1776,7 +1821,7 @@ impl App {
                 .ensure_visible(index, theme.row_height);
 
             if single_open || double {
-                self.activate_selected()?;
+                self.activate_selected(text_input)?;
                 self.last_click = None;
                 self.drag = None;
             } else {
@@ -1860,7 +1905,18 @@ impl App {
                     t.after_nav();
                     t
                 }
-                Location::Path(p) => Tab::open(p.clone())?,
+                Location::Network => {
+                    let recent = self.settings.remote_recent.clone();
+                    let bookmarks = self.settings.remote_bookmarks.clone();
+                    let mut browser = Browser::open_this_pc()?;
+                    browser.goto_network(false, &recent, &bookmarks)?;
+                    let mut t = Tab::from_browser(browser)?;
+                    t.after_nav();
+                    t
+                }
+                Location::Remote { path, .. } | Location::Path(path) => {
+                    Tab::open(path.clone())?
+                }
             },
         };
         self.tabs.push(tab);
@@ -2031,7 +2087,16 @@ impl App {
     }
 
     fn refresh_view(&mut self) -> Result<()> {
-        self.tab_mut().browser.refresh()?;
+        let recent = self.settings.remote_recent.clone();
+        let bookmarks = self.settings.remote_bookmarks.clone();
+        {
+            let browser = &mut self.tab_mut().browser;
+            if matches!(browser.location, Location::Network) {
+                browser.refresh_network(&recent, &bookmarks)?;
+            } else {
+                browser.refresh()?;
+            }
+        }
         if let Some(other) = self.tab_mut().other.as_mut() {
             other.0.refresh()?;
         }
@@ -2040,13 +2105,137 @@ impl App {
         Ok(())
     }
 
-    fn activate_selected(&mut self) -> Result<()> {
+    fn poll_volumes(&mut self) -> Result<()> {
+        if self.last_volume_poll.elapsed() < Duration::from_secs(2) {
+            return Ok(());
+        }
+        self.last_volume_poll = Instant::now();
+        let Ok(vols) = crate::platform::volumes::list_volumes() else {
+            return Ok(());
+        };
+        let mut now_keys = std::collections::BTreeSet::new();
+        let mut now_mounted = std::collections::BTreeSet::new();
+        for v in &vols {
+            let key = v
+                .device
+                .as_ref()
+                .or(v.mount_path.as_ref())
+                .map(|p| p.display().to_string())
+                .unwrap_or_else(|| v.label.clone());
+            now_keys.insert(key);
+            if v.mounted {
+                if let Some(mp) = &v.mount_path {
+                    now_mounted.insert(mp.display().to_string());
+                }
+            }
+        }
+        if !self.volumes_seeded {
+            self.seen_volume_keys = now_keys;
+            self.mounted_volume_paths = now_mounted;
+            self.volumes_seeded = true;
+            return Ok(());
+        }
+
+        // Auto-mount newly appeared removable / optical devices.
+        if self.settings.auto_mount {
+            for v in &vols {
+                let key = v
+                    .device
+                    .as_ref()
+                    .or(v.mount_path.as_ref())
+                    .map(|p| p.display().to_string())
+                    .unwrap_or_else(|| v.label.clone());
+                let is_new = !self.seen_volume_keys.contains(&key);
+                if is_new
+                    && !v.mounted
+                    && matches!(
+                        v.kind,
+                        crate::platform::volumes::VolumeKind::Removable
+                            | crate::platform::volumes::VolumeKind::Optical
+                    )
+                {
+                    if let Some(target) = v.action_target() {
+                        if let Ok(mount) = crate::platform::volumes::mount_volume(&target) {
+                            now_mounted.insert(mount.display().to_string());
+                            self.on_media_appeared(mount);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Newly mounted paths (system auto-mount or ours).
+        let appeared: Vec<String> = now_mounted
+            .difference(&self.mounted_volume_paths)
+            .cloned()
+            .collect();
+        for mp in appeared {
+            self.on_media_appeared(PathBuf::from(mp));
+        }
+
+        let refresh_this_pc = matches!(self.tab().browser.location, Location::ThisPc)
+            && (now_keys != self.seen_volume_keys || now_mounted != self.mounted_volume_paths);
+        self.seen_volume_keys = now_keys;
+        self.mounted_volume_paths = now_mounted;
+        if refresh_this_pc {
+            let _ = self.tab_mut().browser.refresh();
+        }
+        Ok(())
+    }
+
+    fn on_media_appeared(&mut self, mount: PathBuf) {
+        use crate::settings::MediaAutoOpen;
+        match self.settings.media_auto_open_policy() {
+            MediaAutoOpen::Off => {
+                self.status_override =
+                    Some(format!("Media mounted: {}", mount.display()));
+            }
+            MediaAutoOpen::Open => {
+                if let Ok(()) = self.tab_mut().browser.goto(&mount, true) {
+                    self.tab_mut().after_nav();
+                }
+                self.status_override =
+                    Some(format!("Opened media: {}", mount.display()));
+            }
+            MediaAutoOpen::Ask => {
+                self.pending_media_open = Some(mount.clone());
+                self.confirm.show(
+                    self.chrome.window,
+                    ConfirmAction::OpenMedia,
+                    format!("Open newly mounted media?\n{}", mount.display()),
+                );
+            }
+        }
+    }
+
+    fn activate_selected(&mut self, text_input: &mut TextInputUtil) -> Result<()> {
         let Some(index) = self.tab().list.primary() else {
             return Ok(());
         };
         let Some(entry) = self.tab().browser.entries.get(index).cloned() else {
             return Ok(());
         };
+        let path_s = entry.path.to_string_lossy();
+        if path_s == "fuckfm:connect" {
+            return self.begin_connect_remote(text_input);
+        }
+        if crate::platform::network::is_remote_uri(&path_s) {
+            return self.open_remote_uri(&path_s, None, None, text_input);
+        }
+        // Unmounted volume device: try mount then open.
+        if !entry.is_dir && entry.path.starts_with("/dev") {
+            match crate::platform::volumes::mount_volume(&entry.path) {
+                Ok(mount) => {
+                    self.tab_mut().browser.goto(&mount, true)?;
+                    self.tab_mut().after_nav();
+                    self.status_override = Some(format!("Mounted {}", mount.display()));
+                }
+                Err(err) => {
+                    self.status_override = Some(format!("Mount failed: {err}"));
+                }
+            }
+            return Ok(());
+        }
         if entry.is_dir {
             self.tab_mut().browser.enter(&entry)?;
             self.tab_mut().after_nav();
@@ -2107,7 +2296,7 @@ impl App {
         let exe = std::env::current_exe().context("current_exe")?;
         let mut cmd = Command::new(exe);
         match &self.tab().browser.location {
-            Location::Path(p) => {
+            Location::Path(p) | Location::Remote { path: p, .. } => {
                 cmd.arg(p);
             }
             Location::ThisPc => {
@@ -2115,6 +2304,9 @@ impl App {
             }
             Location::Trash => {
                 cmd.arg(TRASH);
+            }
+            Location::Network => {
+                cmd.arg(NETWORK);
             }
         }
         cmd.stdin(Stdio::null())
@@ -2467,6 +2659,29 @@ impl App {
 
         self.focus_dual_pane_at(x, y);
 
+        if self
+            .tab()
+            .list
+            .header_strip_hit(x, y, theme.row_height)
+        {
+            let list = &self.tab().list;
+            let under = list.header_hit(x, y, theme.row_height);
+            let items = detail_column_menu(
+                list.show_type,
+                list.show_size,
+                list.show_modified,
+                under,
+            );
+            let mut menu = ContextMenu::open(x, y, items, theme.row_height + 4);
+            let (w, h) = (
+                self.chrome.window.x + self.chrome.window.w,
+                self.chrome.window.y + self.chrome.window.h,
+            );
+            menu.clamp_to(Rect::new(0, 0, w, h));
+            self.context_menu = Some(menu);
+            return Ok(());
+        }
+
         let len = self.tab().browser.entries.len();
 
         // Prefer selection under cursor in the file list.
@@ -2529,7 +2744,7 @@ impl App {
         let selected = self.selected_paths();
         let folder = self.context_folder(&selected);
         match action {
-            ContextAction::Open => self.activate_selected()?,
+            ContextAction::Open => self.activate_selected(text_input)?,
             ContextAction::OpenInNewTab => self.open_selected_in_new_tab()?,
             ContextAction::OpenWith { app_id } => {
                 if let Some(path) = selected.first() {
@@ -2557,12 +2772,118 @@ impl App {
                     }
                 }
             }
+            ContextAction::SetDefaultApp { app_id } => {
+                if let Some(path) = selected.first() {
+                    match set_default_app(path, &app_id) {
+                        Ok(()) => {
+                            self.status_override =
+                                Some(format!("Default set: {app_id}"));
+                        }
+                        Err(err) => {
+                            self.status_override =
+                                Some(format!("Set default failed: {err}"));
+                        }
+                    }
+                }
+            }
+            ContextAction::ToggleAttrReadOnly => {
+                if let Some(path) = selected.first() {
+                    match toggle_readonly(path) {
+                        Ok(on) => {
+                            self.status_override = Some(format!(
+                                "Read-only {}",
+                                if on { "on" } else { "off" }
+                            ));
+                            self.refresh_view()?;
+                        }
+                        Err(err) => {
+                            self.status_override =
+                                Some(format!("Attribute failed: {err}"));
+                        }
+                    }
+                }
+            }
+            ContextAction::ToggleAttrHidden => {
+                if let Some(path) = selected.first() {
+                    match toggle_hidden(path) {
+                        Ok(on) => {
+                            self.status_override = Some(format!(
+                                "Hidden {}",
+                                if on { "on" } else { "off" }
+                            ));
+                            self.refresh_view()?;
+                        }
+                        Err(err) => {
+                            self.status_override =
+                                Some(format!("Attribute failed: {err}"));
+                        }
+                    }
+                }
+            }
+            ContextAction::EditPermissions => {
+                if let Some(path) = selected.first() {
+                    self.begin_perms_edit(path.clone(), text_input);
+                }
+            }
+            ContextAction::TakeOwnership => {
+                if let Some(path) = selected.first() {
+                    match attrs::take_ownership(path) {
+                        Ok(()) => {
+                            self.status_override = Some("Ownership updated".into());
+                            self.refresh_view()?;
+                        }
+                        Err(err) => {
+                            self.status_override =
+                                Some(format!("Take ownership failed: {err}"));
+                        }
+                    }
+                }
+            }
             ContextAction::Rename => self.begin_rename(text_input)?,
             ContextAction::NewFolder => self.new_folder(text_input)?,
             ContextAction::NewFile => self.new_file(text_input)?,
             ContextAction::Duplicate => self.duplicate_selected()?,
             ContextAction::Properties => self.show_properties(),
             ContextAction::CreateLink => self.create_link_selected()?,
+            ContextAction::CreateHardLink => self.create_hardlink_selected()?,
+            ContextAction::MountVolume => self.mount_selected_volume()?,
+            ContextAction::UnmountVolume => self.unmount_selected_volume()?,
+            ContextAction::EjectVolume => self.eject_selected_volume()?,
+            ContextAction::RenameVolumeLabel => self.begin_rename_volume_label(text_input)?,
+            ContextAction::FormatVolume => self.format_selected_volume()?,
+            ContextAction::ConnectRemote => self.begin_connect_remote(text_input)?,
+            ContextAction::AddRemoteBookmark => self.bookmark_selected_remote()?,
+            ContextAction::DisconnectRemote => self.disconnect_selected_remote()?,
+            ContextAction::ToggleDetailColumn { key } => {
+                self.tab_mut().list.toggle_column(key);
+                let on = self.tab().list.column_visible(key);
+                self.status_override = Some(format!(
+                    "{} column {}",
+                    match key {
+                        SortKey::Name => "Name",
+                        SortKey::Type => "Type",
+                        SortKey::Size => "Size",
+                        SortKey::Modified => "Modified",
+                    },
+                    if on { "shown" } else { "hidden" }
+                ));
+            }
+            ContextAction::MoveDetailColumn { key, left } => {
+                if self.tab_mut().list.move_column(key, left) {
+                    self.status_override = Some(format!(
+                        "Moved {} {}",
+                        match key {
+                            SortKey::Name => "Name",
+                            SortKey::Type => "Type",
+                            SortKey::Size => "Size",
+                            SortKey::Modified => "Modified",
+                        },
+                        if left { "left" } else { "right" }
+                    ));
+                } else {
+                    self.status_override = Some("Can't move that column further".into());
+                }
+            }
             ContextAction::CloseTab { index } => self.close_tab(index)?,
             ContextAction::CloseOtherTabs { index } => self.close_other_tabs(index)?,
             ContextAction::CloseTabsToRight { index } => self.close_tabs_to_right(index)?,
@@ -2859,6 +3180,21 @@ impl App {
                 });
                 dirty = true;
             }
+            SettingsHit::ToggleAutoMount => {
+                self.settings.auto_mount = !self.settings.auto_mount;
+                self.status_override = Some(if self.settings.auto_mount {
+                    "Auto-mount on".into()
+                } else {
+                    "Auto-mount off".into()
+                });
+                dirty = true;
+            }
+            SettingsHit::CycleMediaAutoOpen => {
+                let next = self.settings.media_auto_open_policy().next();
+                self.settings.media_auto_open = next.key().into();
+                self.status_override = Some(format!("Media auto-open: {}", next.label()));
+                dirty = true;
+            }
             SettingsHit::CycleConflictPolicy => {
                 self.settings.conflict_policy = self.settings.conflict_policy.next();
                 self.status_override = Some(format!(
@@ -2897,6 +3233,7 @@ impl App {
 
     fn begin_pattern_select(&mut self, text_input: &mut TextInputUtil) {
         self.bookmark_label_edit = None;
+        self.perms_edit = None;
         let (w, h) = (self.chrome.window.w, self.chrome.window.h);
         let rect = Rect::new(
             self.chrome.window.x + (w - 360) / 2,
@@ -2913,9 +3250,38 @@ impl App {
         self.status_override = Some("Pattern select…".into());
     }
 
+    fn begin_perms_edit(&mut self, path: PathBuf, text_input: &mut TextInputUtil) {
+        self.bookmark_label_edit = None;
+        let (w, h) = (self.chrome.window.w, self.chrome.window.h);
+        let rect = Rect::new(
+            self.chrome.window.x + (w - 360) / 2,
+            self.chrome.window.y + (h - 110) / 2,
+            360,
+            110,
+        );
+        let mut prompt = PromptDialog::new(
+            "Permissions (octal)",
+            "e.g. 755 or 0644   Enter = apply   Esc = cancel",
+            rect,
+        );
+        if let Ok(Some(mode)) = attrs::get_unix_mode(&path) {
+            let s = format!("{mode:o}");
+            prompt.cursor = s.len();
+            prompt.text = s;
+        }
+        self.perms_edit = Some(path);
+        self.pattern = Some(prompt);
+        text_input.start();
+        self.status_override = Some("Edit permissions…".into());
+    }
+
     fn cancel_pattern(&mut self, text_input: &mut TextInputUtil) {
         self.pattern = None;
         self.bookmark_label_edit = None;
+        self.perms_edit = None;
+        self.volume_label_edit = None;
+        self.connect_remote_prompt = false;
+        self.remote_creds_uri = None;
         text_input.stop();
         self.status_override = None;
     }
@@ -2964,6 +3330,60 @@ impl App {
             self.status_override = Some("Bookmark renamed".into());
             return;
         }
+        if self.connect_remote_prompt {
+            self.connect_remote_prompt = false;
+            let uri = prompt.text.trim().to_string();
+            if uri.is_empty() {
+                self.status_override = Some("Empty URI".into());
+            } else {
+                let _ = self.open_remote_uri(&uri, None, None, text_input);
+            }
+            return;
+        }
+        if let Some(uri) = self.remote_creds_uri.take() {
+            let raw = prompt.text.trim();
+            let (user, pass) = if let Some((u, p)) = raw.split_once(':') {
+                (Some(u.trim()), Some(p))
+            } else if raw.is_empty() {
+                (None, None)
+            } else {
+                (Some(raw), None)
+            };
+            let _ = self.open_remote_uri(&uri, user, pass, text_input);
+            return;
+        }
+        if let Some(path) = self.volume_label_edit.take() {
+            let label = prompt.text.trim();
+            match crate::platform::volumes::set_volume_label(&path, label) {
+                Ok(()) => {
+                    let _ = self.refresh_view();
+                    self.status_override = Some("Volume label updated".into());
+                }
+                Err(err) => {
+                    self.status_override = Some(format!("Label failed: {err}"));
+                }
+            }
+            return;
+        }
+        if let Some(path) = self.perms_edit.take() {
+            match parse_octal_mode(prompt.text.trim()) {
+                Ok(mode) => match attrs::set_unix_mode(&path, mode) {
+                    Ok(()) => {
+                        self.status_override =
+                            Some(format!("Permissions set to {mode:04o}"));
+                        let _ = self.refresh_view();
+                    }
+                    Err(err) => {
+                        self.status_override =
+                            Some(format!("chmod failed: {err}"));
+                    }
+                },
+                Err(err) => {
+                    self.status_override = Some(err);
+                }
+            }
+            return;
+        }
         let mut pat = prompt.text.trim().to_string();
         if pat.is_empty() {
             self.status_override = Some("Empty pattern".into());
@@ -3005,6 +3425,295 @@ impl App {
             }
             Err(err) => {
                 self.status_override = Some(format!("Link failed: {err}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn create_hardlink_selected(&mut self) -> Result<()> {
+        let Some(path) = self.selected_paths().into_iter().next() else {
+            self.status_override = Some("Nothing selected".into());
+            return Ok(());
+        };
+        match create_hardlink(&path) {
+            Ok(link) => {
+                self.tab_mut().browser.refresh()?;
+                if let Some(idx) = self
+                    .tab()
+                    .browser
+                    .entries
+                    .iter()
+                    .position(|e| e.path == link)
+                {
+                    self.tab_mut().list.select_only(idx);
+                }
+                self.status_override = Some(format!("Hard link: {}", link.display()));
+            }
+            Err(err) => {
+                self.status_override = Some(format!("Hard link failed: {err}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn goto_network_view(&mut self) -> Result<()> {
+        let recent = self.settings.remote_recent.clone();
+        let bookmarks = self.settings.remote_bookmarks.clone();
+        self.tab_mut()
+            .browser
+            .goto_network(true, &recent, &bookmarks)?;
+        self.tab_mut().after_nav();
+        self.status_override = Some("Network".into());
+        Ok(())
+    }
+
+    fn open_remote_uri(
+        &mut self,
+        uri: &str,
+        user: Option<&str>,
+        password: Option<&str>,
+        text_input: &mut TextInputUtil,
+    ) -> Result<()> {
+        match crate::platform::network::open_remote_uri(uri, user, password) {
+            Ok(mount) => {
+                self.settings.remember_remote(&mount.uri);
+                self.persist_settings();
+                self.tab_mut()
+                    .browser
+                    .goto_remote(&mount.uri, mount.path, true)?;
+                self.tab_mut().after_nav();
+                self.status_override = Some(format!("Connected {}", mount.uri));
+            }
+            Err(err) => {
+                let msg = err.to_string();
+                let needs_creds = user.is_none()
+                    && (msg.to_ascii_lowercase().contains("credential")
+                        || msg.to_ascii_lowercase().contains("password")
+                        || msg.to_ascii_lowercase().contains("auth")
+                        || msg.contains("failed"));
+                if needs_creds {
+                    self.begin_remote_creds(uri, text_input);
+                    self.status_override =
+                        Some(format!("Credentials required for {uri}"));
+                } else {
+                    self.status_override = Some(format!("Connect failed: {err}"));
+                }
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_remote_creds(&mut self, uri: &str, text_input: &mut TextInputUtil) {
+        self.bookmark_label_edit = None;
+        self.perms_edit = None;
+        self.volume_label_edit = None;
+        self.connect_remote_prompt = false;
+        let (w, h) = (self.chrome.window.w, self.chrome.window.h);
+        let rect = Rect::new(
+            self.chrome.window.x + (w - 420) / 2,
+            self.chrome.window.y + (h - 110) / 2,
+            420,
+            110,
+        );
+        let prompt = PromptDialog::new(
+            format!("Credentials for {uri}"),
+            "user:password   Enter = connect   Esc = cancel",
+            rect,
+        );
+        self.remote_creds_uri = Some(uri.to_string());
+        self.pattern = Some(prompt);
+        text_input.start();
+    }
+
+    fn begin_connect_remote(&mut self, text_input: &mut TextInputUtil) -> Result<()> {
+        self.bookmark_label_edit = None;
+        self.perms_edit = None;
+        self.volume_label_edit = None;
+        self.remote_creds_uri = None;
+        let (w, h) = (self.chrome.window.w, self.chrome.window.h);
+        let rect = Rect::new(
+            self.chrome.window.x + (w - 420) / 2,
+            self.chrome.window.y + (h - 110) / 2,
+            420,
+            110,
+        );
+        let mut prompt = PromptDialog::new(
+            "Connect to server",
+            "smb://host/share   ftp://…   sftp://…   mtp://…   Enter = connect",
+            rect,
+        );
+        prompt.text = "smb://".into();
+        prompt.cursor = prompt.text.len();
+        self.connect_remote_prompt = true;
+        self.pattern = Some(prompt);
+        text_input.start();
+        self.status_override = Some("Connect remote…".into());
+        Ok(())
+    }
+
+    fn bookmark_selected_remote(&mut self) -> Result<()> {
+        let uri = match &self.tab().browser.location {
+            Location::Remote { uri, .. } => uri.clone(),
+            _ => {
+                if let Some(p) = self.selected_paths().first() {
+                    p.display().to_string()
+                } else {
+                    self.status_override = Some("No remote location".into());
+                    return Ok(());
+                }
+            }
+        };
+        self.settings.add_remote_bookmark(&uri);
+        self.persist_settings();
+        self.status_override = Some("Remote bookmarked".into());
+        Ok(())
+    }
+
+    fn disconnect_selected_remote(&mut self) -> Result<()> {
+        let (uri, path) = match &self.tab().browser.location {
+            Location::Remote { uri, path } => (uri.clone(), path.clone()),
+            _ => {
+                self.status_override = Some("Not on a remote mount".into());
+                return Ok(());
+            }
+        };
+        let _ = path;
+        match crate::platform::network::unmount_remote(&uri) {
+            Ok(()) => {
+                self.goto_network_view()?;
+                self.status_override = Some("Disconnected".into());
+            }
+            Err(err) => {
+                self.status_override = Some(format!("Disconnect failed: {err}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn selected_volume_target(&self) -> Option<PathBuf> {
+        self.selected_paths().into_iter().next().or_else(|| {
+            self.tab().browser.cwd_path().map(|p| p.to_path_buf())
+        })
+    }
+
+    fn mount_selected_volume(&mut self) -> Result<()> {
+        let Some(path) = self.selected_volume_target() else {
+            self.status_override = Some("No volume selected".into());
+            return Ok(());
+        };
+        match crate::platform::volumes::mount_volume(&path) {
+            Ok(mounted) => {
+                self.tab_mut().browser.goto(&mounted, true)?;
+                self.tab_mut().after_nav();
+                self.status_override = Some(format!("Mounted {}", mounted.display()));
+            }
+            Err(err) => {
+                self.status_override = Some(format!("Mount failed: {err}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn unmount_selected_volume(&mut self) -> Result<()> {
+        let Some(path) = self.selected_volume_target() else {
+            self.status_override = Some("No volume selected".into());
+            return Ok(());
+        };
+        match crate::platform::volumes::unmount_volume(&path) {
+            Ok(()) => {
+                self.tab_mut().browser.goto_this_pc(true)?;
+                self.tab_mut().after_nav();
+                self.status_override = Some("Unmounted".into());
+            }
+            Err(err) => {
+                self.status_override = Some(format!("Unmount failed: {err}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn eject_selected_volume(&mut self) -> Result<()> {
+        let Some(path) = self.selected_volume_target() else {
+            self.status_override = Some("No volume selected".into());
+            return Ok(());
+        };
+        match crate::platform::volumes::eject_volume(&path) {
+            Ok(()) => {
+                self.tab_mut().browser.goto_this_pc(true)?;
+                self.tab_mut().after_nav();
+                self.status_override = Some("Ejected".into());
+            }
+            Err(err) => {
+                self.status_override = Some(format!("Eject failed: {err}"));
+            }
+        }
+        Ok(())
+    }
+
+    fn begin_rename_volume_label(&mut self, text_input: &mut TextInputUtil) -> Result<()> {
+        let Some(path) = self.selected_volume_target() else {
+            self.status_override = Some("No volume selected".into());
+            return Ok(());
+        };
+        self.bookmark_label_edit = None;
+        self.perms_edit = None;
+        self.connect_remote_prompt = false;
+        self.remote_creds_uri = None;
+        let (w, h) = (self.chrome.window.w, self.chrome.window.h);
+        let rect = Rect::new(
+            self.chrome.window.x + (w - 360) / 2,
+            self.chrome.window.y + (h - 110) / 2,
+            360,
+            110,
+        );
+        let mut prompt = PromptDialog::new(
+            "Volume label",
+            "Enter = apply   Esc = cancel",
+            rect,
+        );
+        let label = path
+            .file_name()
+            .map(|s| s.to_string_lossy().into_owned())
+            .unwrap_or_default();
+        prompt.cursor = label.len();
+        prompt.text = label;
+        self.volume_label_edit = Some(path);
+        self.pattern = Some(prompt);
+        text_input.start();
+        self.status_override = Some("Rename volume…".into());
+        Ok(())
+    }
+
+    fn format_selected_volume(&mut self) -> Result<()> {
+        let Some(path) = self.selected_volume_target() else {
+            self.status_override = Some("No volume selected".into());
+            return Ok(());
+        };
+        self.pending_format = Some(path.clone());
+        self.confirm.show(
+            self.chrome.window,
+            ConfirmAction::FormatVolume,
+            format!(
+                "Format {} as exFAT?\nThis erases all data on the volume.",
+                path.display()
+            ),
+        );
+        Ok(())
+    }
+
+    fn execute_format_volume(&mut self) -> Result<()> {
+        let Some(path) = self.pending_format.take() else {
+            self.status_override = Some("Nothing to format".into());
+            return Ok(());
+        };
+        match crate::platform::volumes::format_volume(&path, "exfat") {
+            Ok(()) => {
+                self.tab_mut().browser.goto_this_pc(true)?;
+                self.tab_mut().after_nav();
+                self.status_override = Some(format!("Formatted {}", path.display()));
+            }
+            Err(err) => {
+                self.status_override = Some(format!("Format failed: {err}"));
             }
         }
         Ok(())
@@ -3307,6 +4016,8 @@ impl App {
         self.confirm.hide();
         if !yes {
             self.pending_drag = None;
+            self.pending_format = None;
+            self.pending_media_open = None;
             self.status_override = Some("Cancelled".into());
             return Ok(());
         }
@@ -3321,6 +4032,25 @@ impl App {
                     Ok(())
                 }
             }
+            ConfirmAction::FormatVolume => self.execute_format_volume(),
+            ConfirmAction::OpenMedia => {
+                if let Some(path) = self.pending_media_open.take() {
+                    match self.tab_mut().browser.goto(&path, true) {
+                        Ok(()) => {
+                            self.tab_mut().after_nav();
+                            self.status_override =
+                                Some(format!("Opened {}", path.display()));
+                        }
+                        Err(err) => {
+                            self.status_override =
+                                Some(format!("Open media failed: {err}"));
+                        }
+                    }
+                } else {
+                    self.status_override = Some("No media path".into());
+                }
+                Ok(())
+            }
         }
     }
 }
@@ -3328,6 +4058,8 @@ impl App {
 enum AddressTarget {
     ThisPc,
     Trash,
+    Network,
+    Remote(String),
     Path(PathBuf),
 }
 
@@ -3343,6 +4075,14 @@ fn resolve_address(raw: &str, cwd: Option<&Path>) -> Result<AddressTarget> {
         || lower == trash_label().to_ascii_lowercase()
     {
         return Ok(AddressTarget::Trash);
+    }
+    if lower == "network" || s == NETWORK {
+        return Ok(AddressTarget::Network);
+    }
+    if crate::platform::network::is_remote_uri(s) {
+        return Ok(AddressTarget::Remote(
+            crate::platform::network::normalize_uri(s),
+        ));
     }
 
     let path = if s == "~" {
@@ -3489,11 +4229,7 @@ fn handle_cli_flags(args: &[String]) -> Result<Option<i32>> {
 }
 
 fn location_key(loc: &Location) -> String {
-    match loc {
-        Location::ThisPc => THIS_PC.to_string(),
-        Location::Trash => TRASH.to_string(),
-        Location::Path(p) => p.display().to_string(),
-    }
+    loc.session_key()
 }
 
 fn open_tab_from_key(key: &str, icon_scale: u8, show_hidden: bool) -> Result<Tab> {
@@ -3503,6 +4239,22 @@ fn open_tab_from_key(key: &str, icon_scale: u8, show_hidden: bool) -> Result<Tab
         let mut browser = Browser::open_this_pc()?;
         browser.goto_trash(false)?;
         Tab::from_browser(browser)?
+    } else if key == NETWORK {
+        let mut browser = Browser::open_this_pc()?;
+        browser.goto_network(false, &[], &[])?;
+        Tab::from_browser(browser)?
+    } else if crate::platform::network::is_remote_uri(key) {
+        match crate::platform::network::open_remote_uri(key, None, None) {
+            Ok(m) => {
+                let mut browser = Browser::open(&m.path)?;
+                browser.location = Location::Remote {
+                    uri: m.uri,
+                    path: m.path,
+                };
+                Tab::from_browser(browser)?
+            }
+            Err(_) => Tab::open(PathBuf::from(key))?,
+        }
     } else {
         Tab::open(PathBuf::from(key))?
     };
@@ -3512,6 +4264,31 @@ fn open_tab_from_key(key: &str, icon_scale: u8, show_hidden: bool) -> Result<Tab
     }
     tab.after_nav();
     Ok(tab)
+}
+
+fn toggle_readonly(path: &Path) -> Result<bool> {
+    let mut attrs = attrs::get_win_attrs(path)?;
+    attrs.readonly = !attrs.readonly;
+    attrs::set_win_attrs(path, attrs)?;
+    Ok(attrs.readonly)
+}
+
+fn toggle_hidden(path: &Path) -> Result<bool> {
+    let mut attrs = attrs::get_win_attrs(path)?;
+    attrs.hidden = !attrs.hidden;
+    attrs::set_win_attrs(path, attrs)?;
+    Ok(attrs.hidden)
+}
+
+fn parse_octal_mode(s: &str) -> std::result::Result<u32, String> {
+    let t = s.trim().trim_start_matches('0');
+    let t = if s.trim().starts_with('0') && s.trim().len() > 1 {
+        s.trim()
+    } else {
+        t
+    };
+    let raw = if t.is_empty() { "0" } else { s.trim() };
+    u32::from_str_radix(raw, 8).map_err(|_| format!("invalid octal mode: {s}"))
 }
 
 fn open_startup_tabs(

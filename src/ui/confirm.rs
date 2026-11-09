@@ -8,6 +8,10 @@ pub enum ConfirmAction {
     EmptyTrash,
     /// Pending payload lives on App (`pending_drag`).
     DragDrop,
+    /// Pending device path on App (`pending_format`).
+    FormatVolume,
+    /// Pending mount path on App (`pending_media_open`).
+    OpenMedia,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

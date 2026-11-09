@@ -74,6 +74,24 @@ pub fn open_with_dialog(path: &Path) -> Result<()> {
     }
 }
 
+/// Set `app_id` as the default handler for `path`'s type.
+///
+/// Linux: `xdg-mime default <desktop> <mime>`.
+/// Windows: HKCU ProgID for the extension; elevates via UAC on access denied.
+pub fn set_default_app(path: &Path, app_id: &str) -> Result<()> {
+    if !path.is_file() {
+        bail!("set default requires a file");
+    }
+    #[cfg(unix)]
+    {
+        set_default_unix(path, app_id)
+    }
+    #[cfg(windows)]
+    {
+        set_default_windows(path, app_id)
+    }
+}
+
 #[cfg(unix)]
 fn open_unix(path: &Path) -> Result<()> {
     // Absolute paths avoid cwd-relative confusion in handlers / sandboxes.
@@ -487,4 +505,123 @@ fn open_with_dialog_windows(path: &Path) -> Result<()> {
         .spawn()
         .context("OpenAs_RunDLL")?;
     Ok(())
+}
+
+#[cfg(unix)]
+fn set_default_unix(path: &Path, app_id: &str) -> Result<()> {
+    let mime = mime_type_unix(path).unwrap_or_else(|| "application/octet-stream".into());
+    let desktop = if app_id.ends_with(".desktop") {
+        app_id.to_string()
+    } else {
+        format!("{app_id}.desktop")
+    };
+    if !which("xdg-mime") {
+        bail!("xdg-mime not found (install xdg-utils)");
+    }
+    let status = Command::new("xdg-mime")
+        .args(["default", &desktop, &mime])
+        .stdin(Stdio::null())
+        .status()
+        .context("xdg-mime default")?;
+    if status.success() {
+        Ok(())
+    } else {
+        bail!("xdg-mime default failed for {mime} → {desktop}")
+    }
+}
+
+#[cfg(windows)]
+fn set_default_windows(path: &Path, app_id: &str) -> Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+
+    let ext = path
+        .extension()
+        .and_then(|e| e.to_str())
+        .map(|e| format!(".{}", e.to_ascii_lowercase()))
+        .ok_or_else(|| anyhow::anyhow!("file has no extension"))?;
+
+    let exe = resolve_windows_app_path(app_id)
+        .unwrap_or_else(|| PathBuf::from(app_id));
+    let exe_s = exe.to_string_lossy();
+    let exe_s = exe_s.strip_prefix(r"\\?\").unwrap_or(&exe_s);
+    let prog_id = format!(
+        "fuckfm.{}",
+        ext.trim_start_matches('.').to_ascii_lowercase()
+    );
+    let cmd = format!("\"{exe_s}\" \"%1\"");
+
+    match write_user_assoc(&ext, &prog_id, &cmd) {
+        Ok(()) => Ok(()),
+        Err(err) => {
+            let io = err
+                .downcast_ref::<std::io::Error>()
+                .cloned()
+                .or_else(|| {
+                    err.chain()
+                        .find_map(|e| e.downcast_ref::<std::io::Error>().cloned())
+                });
+            if io.as_ref().is_some_and(crate::platform::elevate::is_access_denied) {
+                let script = format!(
+                    "$ext='{ext}'; $progId='{prog_id}'; $cmd='{cmd}'; \
+                     New-Item -Path \"HKCU:\\Software\\Classes\\$ext\" -Force | Out-Null; \
+                     Set-ItemProperty -Path \"HKCU:\\Software\\Classes\\$ext\" -Name '(default)' -Value $progId; \
+                     New-Item -Path \"HKCU:\\Software\\Classes\\$progId\\shell\\open\\command\" -Force | Out-Null; \
+                     Set-ItemProperty -Path \"HKCU:\\Software\\Classes\\$progId\\shell\\open\\command\" -Name '(default)' -Value $cmd"
+                );
+                crate::platform::elevate::run_elevated_powershell(&script)
+            } else {
+                Err(err)
+            }
+        }
+    }
+}
+
+#[cfg(windows)]
+fn write_user_assoc(ext: &str, prog_id: &str, cmd: &str) -> Result<()> {
+    use winreg::enums::*;
+    use winreg::RegKey;
+    let hkcu = RegKey::predef(HKEY_CURRENT_USER);
+    let (ext_key, _) = hkcu
+        .create_subkey(format!(r"Software\Classes\{ext}"))
+        .with_context(|| format!("create Classes\\{ext}"))?;
+    ext_key.set_value("", &prog_id)?;
+    let (cmd_key, _) = hkcu
+        .create_subkey(format!(
+            r"Software\Classes\{prog_id}\shell\open\command"
+        ))
+        .with_context(|| format!("create Classes\\{prog_id}"))?;
+    cmd_key.set_value("", &cmd)?;
+    // Soft hint for Explorer OpenWithList.
+    let _ = hkcu.create_subkey(format!(
+        r"Software\Microsoft\Windows\CurrentVersion\Explorer\FileExts\{ext}\OpenWithList"
+    ));
+    Ok(())
+}
+
+#[cfg(windows)]
+fn resolve_windows_app_path(app_id: &str) -> Option<PathBuf> {
+    let p = PathBuf::from(app_id);
+    if p.is_file() {
+        return Some(p);
+    }
+    if let Ok(path) = std::env::var_os("PATH") {
+        for dir in std::env::split_paths(&path) {
+            let cand = dir.join(app_id);
+            if cand.is_file() {
+                return Some(cand);
+            }
+            if !app_id.ends_with(".exe") {
+                let cand = dir.join(format!("{app_id}.exe"));
+                if cand.is_file() {
+                    return Some(cand);
+                }
+            }
+        }
+    }
+    let system = PathBuf::from(r"C:\Windows\System32").join(app_id);
+    if system.is_file() {
+        return Some(system);
+    }
+    None
 }

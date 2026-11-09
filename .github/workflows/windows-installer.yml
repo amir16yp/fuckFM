@@ -1,0 +1,134 @@
+name: Windows installer
+
+on:
+  push:
+    branches: [main, master]
+  pull_request:
+  workflow_dispatch:
+  release:
+    types: [published]
+
+permissions:
+  contents: read
+
+jobs:
+  build-installer:
+    runs-on: windows-latest
+    permissions:
+      contents: write
+    env:
+      SDL2_VERSION: "2.30.11"
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Read crate version
+        id: ver
+        shell: pwsh
+        run: |
+          $v = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"' |
+            Select-Object -First 1).Matches.Groups[1].Value
+          if (-not $v) { throw "could not read version from Cargo.toml" }
+          "version=$v" | Out-File -FilePath $env:GITHUB_OUTPUT -Append -Encoding utf8
+          Write-Host "version=$v"
+
+      - name: Install Rust stable (MSVC)
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          targets: x86_64-pc-windows-msvc
+
+      - name: Cache cargo
+        uses: Swatinem/rust-cache@v2
+
+      - name: Fetch SDL2 (MSVC)
+        shell: pwsh
+        run: |
+          $ver = $env:SDL2_VERSION
+          $url = "https://github.com/libsdl-org/SDL/releases/download/release-$ver/SDL2-devel-$ver-VC.zip"
+          $zip = Join-Path $env:RUNNER_TEMP "SDL2-devel.zip"
+          $dest = Join-Path $env:RUNNER_TEMP "SDL2"
+          Invoke-WebRequest -Uri $url -OutFile $zip
+          Expand-Archive -Path $zip -DestinationPath $dest -Force
+          $root = Join-Path $dest "SDL2-$ver"
+          if (-not (Test-Path $root)) {
+            $root = Get-ChildItem $dest -Directory | Select-Object -First 1 -ExpandProperty FullName
+          }
+          "SDL2_DIR=$root" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          $lib = Join-Path $root "lib\x64"
+          "LIB=$lib;$env:LIB" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          "PATH=$lib;$env:PATH" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "SDL2_DIR=$root"
+
+      - name: Build release binaries
+        shell: pwsh
+        run: |
+          cargo build --release --bin fuckfm --bin fuckwm --target x86_64-pc-windows-msvc
+          $out = "target\x86_64-pc-windows-msvc\release"
+          if (-not (Test-Path "$out\fuckfm.exe")) { throw "missing fuckfm.exe" }
+          if (-not (Test-Path "$out\fuckwm.exe")) { throw "missing fuckwm.exe" }
+
+      - name: Stage installer payload
+        shell: pwsh
+        run: |
+          $staging = "packaging\staging"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          $out = "target\x86_64-pc-windows-msvc\release"
+          Copy-Item "$out\fuckfm.exe" $staging
+          Copy-Item "$out\fuckwm.exe" $staging
+
+          $dll = Join-Path $env:SDL2_DIR "lib\x64\SDL2.dll"
+          if (-not (Test-Path $dll)) { throw "SDL2.dll not found at $dll" }
+          Copy-Item $dll $staging
+
+          New-Item -ItemType Directory -Force -Path "$staging\assets\icons" | Out-Null
+          if (Test-Path "assets\icons") {
+            Copy-Item "assets\icons\*" "$staging\assets\icons\" -Recurse -Force
+          }
+          foreach ($f in @("classic.ttf", "ui.ttf")) {
+            $src = Join-Path "assets" $f
+            if (Test-Path $src) { Copy-Item $src "$staging\assets\" }
+          }
+
+          Get-ChildItem $staging -Recurse | Select-Object FullName
+
+      - name: Install Inno Setup
+        shell: pwsh
+        run: |
+          choco install innosetup -y --no-progress
+          $iscc = @(
+            "${env:ProgramFiles(x86)}\Inno Setup 6\ISCC.exe",
+            "${env:ProgramFiles}\Inno Setup 6\ISCC.exe"
+          ) | Where-Object { Test-Path $_ } | Select-Object -First 1
+          if (-not $iscc) { throw "ISCC.exe not found after Inno Setup install" }
+          "ISCC=$iscc" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+          Write-Host "ISCC=$iscc"
+
+      - name: Compile setup.exe
+        shell: pwsh
+        run: |
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          $stagingAbs = (Resolve-Path "packaging\staging").Path
+          & $env:ISCC `
+            "/DMyAppVersion=$($env:VERSION)" `
+            "/DStagingDir=$stagingAbs" `
+            "packaging\windows\fuckfm.iss"
+          if ($LASTEXITCODE -ne 0) { throw "ISCC failed" }
+          Get-ChildItem dist
+        env:
+          VERSION: ${{ steps.ver.outputs.version }}
+
+      - name: Upload setup artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: fuckFM-Setup-${{ steps.ver.outputs.version }}
+          path: dist/fuckFM-Setup-*.exe
+          if-no-files-found: error
+
+      - name: Attach setup to GitHub release
+        if: github.event_name == 'release'
+        uses: softprops/action-gh-release@v2
+        with:
+          files: dist/fuckFM-Setup-*.exe
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

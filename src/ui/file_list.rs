@@ -58,10 +58,16 @@ pub struct FileList {
     pub view: ViewMode,
     /// 1..=4 — Icons view tile multiplier.
     pub icon_scale: u8,
-    /// Details column width fractions (Name / Type / Size); Modified gets the remainder.
+    /// Details column width fractions (renormalized across visible columns when drawing).
     pub col_name: f32,
     pub col_type: f32,
     pub col_size: f32,
+    pub col_modified: f32,
+    pub show_type: bool,
+    pub show_size: bool,
+    pub show_modified: bool,
+    /// Order of optional Details columns (Type / Size / Modified).
+    pub detail_order: [SortKey; 3],
 }
 
 impl FileList {
@@ -77,19 +83,107 @@ impl FileList {
             col_name: 0.42,
             col_type: 0.16,
             col_size: 0.16,
+            col_modified: 0.26,
+            show_type: true,
+            show_size: true,
+            show_modified: true,
+            detail_order: [SortKey::Type, SortKey::Size, SortKey::Modified],
         }
     }
 
-    fn details_widths(&self, inner_w: i32) -> (i32, i32, i32, i32) {
-        let name_w = ((inner_w as f32) * self.col_name).round() as i32;
-        let type_w = ((inner_w as f32) * self.col_type).round() as i32;
-        let size_w = ((inner_w as f32) * self.col_size).round() as i32;
-        let used = name_w + type_w + size_w;
-        let date_w = (inner_w - used).max(40);
-        (name_w.max(60), type_w.max(40), size_w.max(40), date_w)
+    pub fn column_visible(&self, key: SortKey) -> bool {
+        match key {
+            SortKey::Name => true,
+            SortKey::Type => self.show_type,
+            SortKey::Size => self.show_size,
+            SortKey::Modified => self.show_modified,
+        }
     }
 
-    /// Hit-test Details column dividers (0=Name|Type, 1=Type|Size, 2=Size|Modified).
+    pub fn toggle_column(&mut self, key: SortKey) {
+        match key {
+            SortKey::Name => {}
+            SortKey::Type => self.show_type = !self.show_type,
+            SortKey::Size => self.show_size = !self.show_size,
+            SortKey::Modified => self.show_modified = !self.show_modified,
+        }
+    }
+
+    /// Swap optional column `key` with its left/right neighbor in `detail_order`.
+    pub fn move_column(&mut self, key: SortKey, left: bool) -> bool {
+        if matches!(key, SortKey::Name) {
+            return false;
+        }
+        let Some(idx) = self.detail_order.iter().position(|k| *k == key) else {
+            return false;
+        };
+        let swap_with = if left {
+            idx.checked_sub(1)
+        } else if idx + 1 < self.detail_order.len() {
+            Some(idx + 1)
+        } else {
+            None
+        };
+        let Some(other) = swap_with else {
+            return false;
+        };
+        self.detail_order.swap(idx, other);
+        true
+    }
+
+    /// Visible Details columns in draw order (Name first).
+    pub fn visible_detail_columns(&self) -> Vec<SortKey> {
+        let mut cols = vec![SortKey::Name];
+        for key in self.detail_order {
+            if self.column_visible(key) {
+                cols.push(key);
+            }
+        }
+        cols
+    }
+
+    fn col_frac(&self, key: SortKey) -> f32 {
+        match key {
+            SortKey::Name => self.col_name,
+            SortKey::Type => self.col_type,
+            SortKey::Size => self.col_size,
+            SortKey::Modified => self.col_modified,
+        }
+    }
+
+    fn set_col_frac(&mut self, key: SortKey, value: f32) {
+        match key {
+            SortKey::Name => self.col_name = value,
+            SortKey::Type => self.col_type = value,
+            SortKey::Size => self.col_size = value,
+            SortKey::Modified => self.col_modified = value,
+        }
+    }
+
+    /// Widths for each visible Details column, totaling `inner_w`.
+    fn details_col_widths(&self, inner_w: i32) -> Vec<(SortKey, i32)> {
+        let cols = self.visible_detail_columns();
+        if cols.is_empty() {
+            return vec![(SortKey::Name, inner_w.max(60))];
+        }
+        let fracs: Vec<f32> = cols.iter().map(|k| self.col_frac(*k)).collect();
+        let sum: f32 = fracs.iter().sum::<f32>().max(0.01);
+        let mut widths: Vec<(SortKey, i32)> = cols
+            .iter()
+            .zip(fracs.iter())
+            .map(|(k, f)| {
+                let min = if *k == SortKey::Name { 60 } else { 40 };
+                (*k, (((*f / sum) * inner_w as f32).round() as i32).max(min))
+            })
+            .collect();
+        let used: i32 = widths.iter().map(|(_, w)| *w).sum();
+        if let Some((_, last)) = widths.last_mut() {
+            *last = (*last + (inner_w - used)).max(40);
+        }
+        widths
+    }
+
+    /// Hit-test Details column dividers between adjacent visible columns.
     pub fn column_divider_hit(&self, x: i32, y: i32, base_row: i32) -> Option<usize> {
         if self.view != ViewMode::Details || base_row <= 0 {
             return None;
@@ -99,9 +193,13 @@ impl FileList {
         if !header.contains(x, y) {
             return None;
         }
-        let (name_w, type_w, size_w, _) = self.details_widths(inner.w);
-        let edges = [inner.x + name_w, inner.x + name_w + type_w, inner.x + name_w + type_w + size_w];
-        for (i, edge) in edges.iter().enumerate() {
+        let widths = self.details_col_widths(inner.w);
+        if widths.len() < 2 {
+            return None;
+        }
+        let mut edge = inner.x;
+        for (i, (_, w)) in widths.iter().enumerate().take(widths.len() - 1) {
+            edge += *w;
             if (x - edge).abs() <= 4 {
                 return Some(i);
             }
@@ -109,38 +207,26 @@ impl FileList {
         None
     }
 
-    /// Drag divider `which` by `delta_px` pixels.
+    /// Drag divider `which` (between visible cols which and which+1) by `delta_px`.
     pub fn resize_column(&mut self, which: usize, delta_px: i32, inner_w: i32) {
         if inner_w <= 0 {
             return;
         }
+        let cols = self.visible_detail_columns();
+        if which + 1 >= cols.len() {
+            return;
+        }
+        let left = cols[which];
+        let right = cols[which + 1];
         let d = delta_px as f32 / inner_w as f32;
         const MIN: f32 = 0.08;
-        match which {
-            0 => {
-                let next = (self.col_name + d).clamp(MIN, 0.70);
-                let grow = next - self.col_name;
-                if self.col_type - grow >= MIN {
-                    self.col_name = next;
-                    self.col_type -= grow;
-                }
-            }
-            1 => {
-                let next = (self.col_type + d).clamp(MIN, 0.50);
-                let grow = next - self.col_type;
-                if self.col_size - grow >= MIN {
-                    self.col_type = next;
-                    self.col_size -= grow;
-                }
-            }
-            2 => {
-                let next = (self.col_size + d).clamp(MIN, 0.50);
-                let rest = 1.0 - self.col_name - self.col_type - next;
-                if rest >= MIN {
-                    self.col_size = next;
-                }
-            }
-            _ => {}
+        let left_f = self.col_frac(left);
+        let right_f = self.col_frac(right);
+        let next_left = (left_f + d).clamp(MIN, 0.70);
+        let grow = next_left - left_f;
+        if right_f - grow >= MIN {
+            self.set_col_frac(left, next_left);
+            self.set_col_frac(right, right_f - grow);
         }
     }
 
@@ -248,17 +334,23 @@ impl FileList {
         if !header.contains(x, y) {
             return None;
         }
-        let (name_w, type_w, size_w, _) = self.details_widths(inner.w);
-        let rel = x - inner.x;
-        if rel < name_w {
-            Some(SortKey::Name)
-        } else if rel < name_w + type_w {
-            Some(SortKey::Type)
-        } else if rel < name_w + type_w + size_w {
-            Some(SortKey::Size)
-        } else {
-            Some(SortKey::Modified)
+        let mut edge = inner.x;
+        for (key, w) in self.details_col_widths(inner.w) {
+            if x < edge + w {
+                return Some(key);
+            }
+            edge += w;
         }
+        Some(SortKey::Name)
+    }
+
+    /// True when `(x,y)` is on the Details header strip.
+    pub fn header_strip_hit(&self, x: i32, y: i32, base_row: i32) -> bool {
+        if self.view != ViewMode::Details || base_row <= 0 {
+            return false;
+        }
+        let inner = self.rect.shrink(2);
+        Rect::new(inner.x, inner.y, inner.w, base_row).contains(x, y)
     }
 
     pub fn index_at(&self, x: i32, y: i32, base_row: i32) -> Option<usize> {
@@ -416,43 +508,37 @@ impl FileList {
         let theme = frame.theme;
         let row_h = theme.row_height;
         let mut y0 = inner.y;
-        let (name_w, type_w, size_w, _) = if details {
-            self.details_widths(inner.w)
+        let col_layout = if details {
+            self.details_col_widths(inner.w)
         } else {
-            (inner.w, 0, 0, 0)
+            vec![(SortKey::Name, inner.w)]
         };
-        let type_x = inner.x + name_w;
-        let size_x = type_x + type_w;
-        let date_x = size_x + size_w;
+        let name_w = col_layout
+            .iter()
+            .find(|(k, _)| *k == SortKey::Name)
+            .map(|(_, w)| *w)
+            .unwrap_or(inner.w);
 
         if details {
             let header = Rect::new(inner.x, inner.y, inner.w, row_h);
             frame.fill(header, theme.window);
             let marker = if sort_asc { " ▲" } else { " ▼" };
-            let name = format!(
-                "Name{}",
-                if sort_key == SortKey::Name { marker } else { "" }
-            );
-            let ty = format!(
-                "Type{}",
-                if sort_key == SortKey::Type { marker } else { "" }
-            );
-            let size = format!(
-                "Size{}",
-                if sort_key == SortKey::Size { marker } else { "" }
-            );
-            let modified = format!(
-                "Modified{}",
-                if sort_key == SortKey::Modified {
-                    marker
-                } else {
-                    ""
-                }
-            );
-            frame.text(&name, inner.x + 8, inner.y + 2, theme.text)?;
-            frame.text(&ty, type_x + 4, inner.y + 2, theme.text)?;
-            frame.text(&size, size_x + 4, inner.y + 2, theme.text)?;
-            frame.text(&modified, date_x + 4, inner.y + 2, theme.text)?;
+            let mut x = inner.x;
+            for (key, w) in &col_layout {
+                let label = match key {
+                    SortKey::Name => "Name",
+                    SortKey::Type => "Type",
+                    SortKey::Size => "Size",
+                    SortKey::Modified => "Modified",
+                };
+                let text = format!(
+                    "{label}{}",
+                    if sort_key == *key { marker } else { "" }
+                );
+                let pad = if *key == SortKey::Name { 8 } else { 4 };
+                frame.text(&text, x + pad, inner.y + 2, theme.text)?;
+                x += *w;
+            }
             y0 += row_h;
         }
 
@@ -490,36 +576,49 @@ impl FileList {
                 text_color,
             )?;
             if details {
-                let ty = clip_text(
-                    frame,
-                    &crate::browser::entry_type_label(entry),
-                    type_w - 8,
-                );
-                frame.text(
-                    &ty,
-                    type_x + 4,
-                    y + (row_h - theme.font_size as i32) / 2,
-                    text_color,
-                )?;
-                let size = format_size(entry);
-                let size_text_y = if matches!(entry.kind, EntryKind::Drive { .. }) {
-                    y + 1
-                } else {
-                    y + (row_h - theme.font_size as i32) / 2
-                };
-                frame.text(&size, size_x + 4, size_text_y, text_color)?;
-                draw_drive_usage_bar(
-                    frame,
-                    entry,
-                    Rect::new(size_x + 4, y + row_h - 6, (size_w - 8).max(8), 3),
-                )?;
-                let modified = format_mtime(entry.modified);
-                frame.text(
-                    &modified,
-                    date_x + 4,
-                    y + (row_h - theme.font_size as i32) / 2,
-                    text_color,
-                )?;
+                let mut x = inner.x;
+                for (key, w) in &col_layout {
+                    match key {
+                        SortKey::Name => {}
+                        SortKey::Type => {
+                            let ty = clip_text(
+                                frame,
+                                &crate::browser::entry_type_label(entry),
+                                *w - 8,
+                            );
+                            frame.text(
+                                &ty,
+                                x + 4,
+                                y + (row_h - theme.font_size as i32) / 2,
+                                text_color,
+                            )?;
+                        }
+                        SortKey::Size => {
+                            let size = format_size(entry);
+                            let size_text_y = if matches!(entry.kind, EntryKind::Drive { .. }) {
+                                y + 1
+                            } else {
+                                y + (row_h - theme.font_size as i32) / 2
+                            };
+                            frame.text(&size, x + 4, size_text_y, text_color)?;
+                            draw_drive_usage_bar(
+                                frame,
+                                entry,
+                                Rect::new(x + 4, y + row_h - 6, (*w - 8).max(8), 3),
+                            )?;
+                        }
+                        SortKey::Modified => {
+                            let modified = format_mtime(entry.modified);
+                            frame.text(
+                                &modified,
+                                x + 4,
+                                y + (row_h - theme.font_size as i32) / 2,
+                                text_color,
+                            )?;
+                        }
+                    }
+                    x += *w;
+                }
             }
         }
         Ok(())

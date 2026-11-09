@@ -1,4 +1,4 @@
-//! Native display backends for fuckWM / dwm.
+//! Native display backends for fuckWM.
 //!
 //! - Unix: X11 reparenting WM (`x11` module)
 //! - Windows: Win32 shell host (`win32` module)

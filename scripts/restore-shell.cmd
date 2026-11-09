@@ -1,5 +1,5 @@
 @echo off
-REM Restore the previous Winlogon Shell (undo Explorer / dwm replacement).
+REM Restore the previous Winlogon Shell (undo Explorer / fuckwm replacement).
 REM Same as: scripts\install-shell.cmd /restore
 REM
 REM Log off or reboot after running for Explorer to come back.

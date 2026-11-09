@@ -51,6 +51,55 @@ pub struct Settings {
     pub bookmarks: Vec<PathBuf>,
     /// Optional display labels for bookmarks (keyed by path string).
     pub bookmark_labels: BTreeMap<String, String>,
+    /// Auto-mount newly inserted removable volumes.
+    pub auto_mount: bool,
+    /// Media insert policy: `off` | `open` | `ask`.
+    pub media_auto_open: String,
+    /// Bookmarked remote URIs (`smb://…`).
+    pub remote_bookmarks: Vec<String>,
+    /// Recently opened remote URIs.
+    pub remote_recent: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum MediaAutoOpen {
+    Off,
+    Open,
+    Ask,
+}
+
+impl MediaAutoOpen {
+    pub fn from_key(s: &str) -> Self {
+        match s.trim().to_ascii_lowercase().as_str() {
+            "open" => Self::Open,
+            "ask" => Self::Ask,
+            _ => Self::Off,
+        }
+    }
+
+    pub fn key(self) -> &'static str {
+        match self {
+            Self::Off => "off",
+            Self::Open => "open",
+            Self::Ask => "ask",
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Off => "Do nothing",
+            Self::Open => "Open folder",
+            Self::Ask => "Ask",
+        }
+    }
+
+    pub fn next(self) -> Self {
+        match self {
+            Self::Off => Self::Open,
+            Self::Open => Self::Ask,
+            Self::Ask => Self::Off,
+        }
+    }
 }
 
 impl Default for Settings {
@@ -78,6 +127,10 @@ impl Default for Settings {
             folder_views: BTreeMap::new(),
             bookmarks: Vec::new(),
             bookmark_labels: BTreeMap::new(),
+            auto_mount: true,
+            media_auto_open: "ask".into(),
+            remote_bookmarks: Vec::new(),
+            remote_recent: Vec::new(),
         }
     }
 }
@@ -225,6 +278,28 @@ impl Settings {
                 }
             }
         }
+        if let Some(v) = doc.get_bool("media", "auto_mount") {
+            s.auto_mount = v;
+        }
+        if let Some(raw) = doc.get_str("media", "auto_open") {
+            s.media_auto_open = MediaAutoOpen::from_key(raw).key().into();
+        }
+        if let Some(raw) = doc.get_str("network", "bookmarks") {
+            s.remote_bookmarks = raw
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
+        if let Some(raw) = doc.get_str("network", "recent") {
+            s.remote_recent = raw
+                .lines()
+                .map(str::trim)
+                .filter(|s| !s.is_empty())
+                .map(str::to_string)
+                .collect();
+        }
         s.clamp_icon_scale();
         s
     }
@@ -351,7 +426,52 @@ impl Settings {
             .collect::<Vec<_>>()
             .join("\n");
         doc.set("bookmarks", "paths", Value::Str(paths));
+        doc.set("media", "auto_mount", Value::Bool(self.auto_mount));
+        doc.set(
+            "media",
+            "auto_open",
+            Value::Str(self.media_auto_open.clone()),
+        );
+        doc.set(
+            "network",
+            "bookmarks",
+            Value::Str(self.remote_bookmarks.join("\n")),
+        );
+        doc.set(
+            "network",
+            "recent",
+            Value::Str(self.remote_recent.join("\n")),
+        );
         doc
+    }
+
+    pub fn media_auto_open_policy(&self) -> MediaAutoOpen {
+        MediaAutoOpen::from_key(&self.media_auto_open)
+    }
+
+    pub fn remember_remote(&mut self, uri: &str) {
+        let uri = uri.trim();
+        if uri.is_empty() {
+            return;
+        }
+        self.remote_recent.retain(|u| u != uri);
+        self.remote_recent.insert(0, uri.to_string());
+        self.remote_recent.truncate(24);
+    }
+
+    pub fn add_remote_bookmark(&mut self, uri: &str) -> bool {
+        let uri = uri.trim();
+        if uri.is_empty() || self.remote_bookmarks.iter().any(|u| u == uri) {
+            return false;
+        }
+        self.remote_bookmarks.push(uri.to_string());
+        true
+    }
+
+    pub fn remove_remote_bookmark(&mut self, uri: &str) -> bool {
+        let before = self.remote_bookmarks.len();
+        self.remote_bookmarks.retain(|u| u != uri);
+        self.remote_bookmarks.len() != before
     }
 
     pub fn view_for(&self, location_key: &str) -> Option<ViewMode> {

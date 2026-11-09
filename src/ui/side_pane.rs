@@ -10,6 +10,7 @@ use std::path::{Path, PathBuf};
 pub enum PlaceTarget {
     ThisPc,
     Trash,
+    Network,
     Path(PathBuf),
 }
 
@@ -54,7 +55,9 @@ impl SidePane {
         self.selected = self.places.iter().position(|p| match (&p.target, location) {
             (PlaceTarget::ThisPc, Location::ThisPc) => true,
             (PlaceTarget::Trash, Location::Trash) => true,
+            (PlaceTarget::Network, Location::Network | Location::Remote { .. }) => true,
             (PlaceTarget::Path(a), Location::Path(b)) => same_path(a, b),
+            (PlaceTarget::Path(a), Location::Remote { path: b, .. }) => same_path(a, b),
             _ => false,
         });
     }
@@ -163,6 +166,11 @@ fn default_places(bookmarks: &[PathBuf], labels: &BTreeMap<String, String>) -> V
         target: PlaceTarget::Trash,
         bookmark: false,
     });
+    places.push(Place {
+        label: "Network".into(),
+        target: PlaceTarget::Network,
+        bookmark: false,
+    });
     #[cfg(unix)]
     places.push(Place {
         label: "Root".into(),
@@ -204,6 +212,7 @@ fn place_targets_eq(a: &PlaceTarget, b: &PlaceTarget) -> bool {
     match (a, b) {
         (PlaceTarget::ThisPc, PlaceTarget::ThisPc) => true,
         (PlaceTarget::Trash, PlaceTarget::Trash) => true,
+        (PlaceTarget::Network, PlaceTarget::Network) => true,
         (PlaceTarget::Path(a), PlaceTarget::Path(b)) => same_path(a, b),
         _ => false,
     }

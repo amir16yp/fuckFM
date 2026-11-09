@@ -29,6 +29,7 @@ pub enum ChromeHit {
 pub enum CrumbTarget {
     ThisPc,
     Trash,
+    Network,
     Path(PathBuf),
 }
 
@@ -563,6 +564,23 @@ fn build_path_crumbs(location: &Location) -> Vec<PathCrumb> {
             PathCrumb {
                 label: trash_label().into(),
                 target: CrumbTarget::Trash,
+                rect: Rect::default(),
+            },
+        ],
+        Location::Network => vec![PathCrumb {
+            label: "Network".into(),
+            target: CrumbTarget::Network,
+            rect: Rect::default(),
+        }],
+        Location::Remote { uri, path } => vec![
+            PathCrumb {
+                label: "Network".into(),
+                target: CrumbTarget::Network,
+                rect: Rect::default(),
+            },
+            PathCrumb {
+                label: uri.clone(),
+                target: CrumbTarget::Path(path.clone()),
                 rect: Rect::default(),
             },
         ],

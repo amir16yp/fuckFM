@@ -1,4 +1,4 @@
-//! Desktop surface — wallpaper fill + icon layer from ~/Desktop.
+//! Desktop surface — wallpaper icon layer, arrange/grid, context actions.
 
 use crate::iconpack::{purpose, purpose_for_file, IconPack};
 use crate::render::{Frame, Rect};
@@ -13,32 +13,78 @@ pub struct DeskIcon {
     pub path: PathBuf,
     pub is_dir: bool,
     pub rect: Rect,
+    /// Free-placement cell when auto-arrange is off (col, row).
+    pub col: i32,
+    pub row: i32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeskArrange {
+    Auto,
+    AlignGrid,
+    Free,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum DeskAction {
+    Refresh,
+    OpenFm,
+    NewFolder,
+    ToggleAutoArrange,
+    AlignToGrid,
+    Personalize,
+    ShowDesktop,
+    Exit,
 }
 
 pub struct Desktop {
     pub icons: Vec<DeskIcon>,
     pub hover: Option<usize>,
     pub selected: Option<usize>,
+    pub arrange: DeskArrange,
+    pub peek: bool,
+    pub area: Rect,
+    pub cell_w: i32,
+    pub cell_h: i32,
 }
 
 impl Desktop {
     pub fn load() -> Self {
+        let mut desk = Self {
+            icons: Vec::new(),
+            hover: None,
+            selected: None,
+            arrange: DeskArrange::Auto,
+            peek: false,
+            area: Rect::default(),
+            cell_w: 84,
+            cell_h: 72,
+        };
+        desk.reload_icons();
+        desk
+    }
+
+    pub fn reload_icons(&mut self) {
         let mut icons = Vec::new();
         if let Some(dir) = desktop_dir() {
             if let Ok(rd) = fs::read_dir(&dir) {
                 let mut entries: Vec<_> = rd.flatten().collect();
                 entries.sort_by_key(|e| e.file_name());
-                for ent in entries.into_iter().take(48) {
+                for (i, ent) in entries.into_iter().take(64).enumerate() {
                     let path = ent.path();
                     let name = ent.file_name().to_string_lossy().into_owned();
                     if name.starts_with('.') {
                         continue;
                     }
+                    let col = (i as i32) % 8;
+                    let row = (i as i32) / 8;
                     icons.push(DeskIcon {
                         is_dir: path.is_dir(),
                         name,
                         path,
                         rect: Rect::default(),
+                        col,
+                        row,
                     });
                 }
             }
@@ -51,38 +97,99 @@ impl Desktop {
                     path: PathBuf::from(home),
                     is_dir: true,
                     rect: Rect::default(),
+                    col: 0,
+                    row: 0,
                 });
             }
         }
-        Self {
-            icons,
-            hover: None,
-            selected: None,
-        }
+        self.icons = icons;
     }
 
     pub fn layout(&mut self, area: Rect, theme: &Theme) {
-        let cell_w = 84;
-        let cell_h = theme.row_height + 52;
-        let cols = ((area.w - 16) / cell_w).max(1);
-        for (i, icon) in self.icons.iter_mut().enumerate() {
-            let col = (i as i32) % cols;
-            let row = (i as i32) / cols;
-            icon.rect = Rect::new(
-                area.x + 12 + col * cell_w,
-                area.y + 12 + row * cell_h,
-                cell_w - 8,
-                cell_h - 8,
-            );
+        self.area = area;
+        self.cell_w = 84;
+        self.cell_h = theme.row_height + 52;
+        let cols = ((area.w - 16) / self.cell_w).max(1);
+
+        match self.arrange {
+            DeskArrange::Auto => {
+                for (i, icon) in self.icons.iter_mut().enumerate() {
+                    let col = (i as i32) % cols;
+                    let row = (i as i32) / cols;
+                    icon.col = col;
+                    icon.row = row;
+                    icon.rect = cell_rect(area, col, row, self.cell_w, self.cell_h);
+                }
+            }
+            DeskArrange::AlignGrid | DeskArrange::Free => {
+                for icon in self.icons.iter_mut() {
+                    if self.arrange == DeskArrange::AlignGrid {
+                        // Snap stored col/row into the visible grid.
+                        icon.col = icon.col.clamp(0, cols - 1);
+                        icon.row = icon.row.max(0);
+                    }
+                    icon.rect = cell_rect(area, icon.col, icon.row, self.cell_w, self.cell_h);
+                }
+            }
         }
+    }
+
+    pub fn align_to_grid(&mut self) {
+        self.arrange = DeskArrange::AlignGrid;
+        if self.area.w > 0 {
+            // snap by current rect centers
+            for icon in &mut self.icons {
+                let cx = icon.rect.x + icon.rect.w / 2 - self.area.x - 12;
+                let cy = icon.rect.y + icon.rect.h / 2 - self.area.y - 12;
+                icon.col = (cx / self.cell_w.max(1)).max(0);
+                icon.row = (cy / self.cell_h.max(1)).max(0);
+            }
+        }
+    }
+
+    pub fn toggle_auto_arrange(&mut self) {
+        self.arrange = if self.arrange == DeskArrange::Auto {
+            DeskArrange::Free
+        } else {
+            DeskArrange::Auto
+        };
     }
 
     pub fn index_at(&self, x: i32, y: i32) -> Option<usize> {
         self.icons.iter().position(|ic| ic.rect.contains(x, y))
     }
 
+    pub fn context_items(&self) -> Vec<(String, DeskAction)> {
+        let auto = self.arrange == DeskArrange::Auto;
+        vec![
+            ("Refresh".into(), DeskAction::Refresh),
+            ("Open fuckFM".into(), DeskAction::OpenFm),
+            ("New Folder".into(), DeskAction::NewFolder),
+            (
+                if auto {
+                    "Auto arrange icons ✓".into()
+                } else {
+                    "Auto arrange icons".into()
+                },
+                DeskAction::ToggleAutoArrange,
+            ),
+            ("Align icons to grid".into(), DeskAction::AlignToGrid),
+            ("Personalize (cycle theme)".into(), DeskAction::Personalize),
+            ("Show Desktop".into(), DeskAction::ShowDesktop),
+            ("Exit".into(), DeskAction::Exit),
+        ]
+    }
+
+    /// Build platform context items for the SDL shell menu helper.
+    pub fn context_menu_labels(&self) -> Vec<String> {
+        self.context_items().into_iter().map(|(l, _)| l).collect()
+    }
+
     pub fn draw(&self, frame: &mut Frame<'_>, pack: &IconPack) -> Result<()> {
         let theme = frame.theme;
+        if self.peek {
+            // Peek: dim icons slightly by skipping draw of selection chrome only.
+        }
         for (i, icon) in self.icons.iter().enumerate() {
             let selected = self.selected == Some(i);
             let hover = self.hover == Some(i);
@@ -118,6 +225,37 @@ impl Desktop {
         }
         Ok(())
     }
+
+    pub fn new_folder(&mut self) -> Result<PathBuf> {
+        let dir = desktop_dir().ok_or_else(|| anyhow::anyhow!("Desktop folder missing"))?;
+        let mut n = 1;
+        loop {
+            let name = if n == 1 {
+                "New Folder".to_string()
+            } else {
+                format!("New Folder ({n})")
+            };
+            let path = dir.join(&name);
+            if !path.exists() {
+                fs::create_dir(&path)?;
+                self.reload_icons();
+                return Ok(path);
+            }
+            n += 1;
+            if n > 99 {
+                anyhow::bail!("too many New Folder copies");
+            }
+        }
+    }
+}
+
+fn cell_rect(area: Rect, col: i32, row: i32, cell_w: i32, cell_h: i32) -> Rect {
+    Rect::new(
+        area.x + 12 + col * cell_w,
+        area.y + 12 + row * cell_h,
+        cell_w - 8,
+        cell_h - 8,
+    )
 }
 
 fn desktop_dir() -> Option<PathBuf> {
@@ -215,4 +353,8 @@ pub fn open_desk_item(path: &Path) -> Result<()> {
         }
     }
     crate::platform::open_default(path)
+}
+
+pub fn desk_action_from_index(desk: &Desktop, index: usize) -> Option<DeskAction> {
+    desk.context_items().into_iter().nth(index).map(|(_, a)| a)
 }

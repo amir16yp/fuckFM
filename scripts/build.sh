@@ -63,7 +63,7 @@ else
 fi
 stage_assets "$LINUX_OUT"
 echo "    linux bins → $LINUX_OUT"
-ls -la "$LINUX_OUT"/fuckfm "$LINUX_OUT"/fuckwm "$LINUX_OUT"/dwm "$LINUX_OUT"/b00merang2fficons 2>/dev/null || true
+ls -la "$LINUX_OUT"/fuckfm "$LINUX_OUT"/fuckwm "$LINUX_OUT"/b00merang2fficons 2>/dev/null || true
 
 echo "==> Windows ($WIN_TARGET)"
 need_target "$WIN_TARGET"
@@ -76,7 +76,7 @@ fi
 WIN_OUT="target/${WIN_TARGET}/${PROFILE}"
 stage_assets "$WIN_OUT"
 echo "    windows bins → $WIN_OUT"
-ls -la "$WIN_OUT"/fuckfm.exe "$WIN_OUT"/fuckwm.exe "$WIN_OUT"/dwm.exe "$WIN_OUT"/b00merang2fficons.exe 2>/dev/null || true
+ls -la "$WIN_OUT"/fuckfm.exe "$WIN_OUT"/fuckwm.exe "$WIN_OUT"/b00merang2fficons.exe 2>/dev/null || true
 
 echo "==> done (${PROFILE})"
 echo "    Linux:   $LINUX_OUT"

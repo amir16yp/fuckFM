@@ -17,7 +17,7 @@ pub fn show_error_text(product: &str, message: &str) {
     }
 }
 
-/// Install a panic hook that shows a MessageBox on Windows (useful when dwm is Shell).
+/// Install a panic hook that shows a MessageBox on Windows (useful when fuckwm is Shell).
 pub fn install_panic_hook(product: &'static str) {
     let default = std::panic::take_hook();
     std::panic::set_hook(Box::new(move |info| {
